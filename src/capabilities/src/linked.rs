@@ -85,6 +85,14 @@ pub const CAPABILITY_SCOPES: &[CapabilityScope] = &[
         permission: "Workers Containers Write",
         scope: "containers.write",
     },
+    // Optional, and powerful: lets an approved data plan mint the multipart publisher's one
+    // bucket-scoped R2 token (`data.multipart_mint`, docs/plans/multipart-enable.md). Pigeon
+    // mints no other shape; leave it ungranted to use your own key instead.
+    CapabilityScope {
+        capability: crate::instances::data_mint::SCOPE,
+        permission: "Account API Tokens Write",
+        scope: "account-api-tokens.write",
+    },
     // Email Routing on the instance's zone: the catch-all rule, the forward destinations and
     // turning routing on. Its DNS review needs only the base DNS Write.
     CapabilityScope {

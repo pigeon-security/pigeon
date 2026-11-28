@@ -8,6 +8,7 @@
 
 pub mod data_apply;
 pub mod data_ingest_runtime;
+pub mod data_mint;
 pub mod data_plan;
 pub mod data_publisher;
 pub mod home;
@@ -882,8 +883,11 @@ impl Instances {
         if backup.is_some() || crate::ingest::connections::uses_owned_credentials(instance) {
             wanted.push("secrets");
         }
-        if data_publisher::fingerprint(instance).is_some() && backup.is_none() {
+        if data_mint::wanted(instance) && backup.is_none() {
             wanted.push("secrets");
+        }
+        if data_mint::mints(instance) {
+            wanted.push(data_mint::SCOPE);
         }
         if data_ingest_runtime::configured(instance).is_some() {
             wanted.push(data_ingest_runtime::SCOPE);
@@ -934,18 +938,28 @@ impl Instances {
                         &e.to_string(),
                     ))
                 })?;
-        if data_publisher::fingerprint(instance).is_some()
-            && seen.bucket_exists
-            && !crate::data_store::inline(instance)
+        if data_mint::wanted(instance) && seen.bucket_exists && !crate::data_store::inline(instance)
         {
-            seen.publisher = Some(
-                data_publisher::observe(
-                    account,
-                    instance,
-                    &crate::data_store::store_name(instance),
-                )
-                .await?,
-            );
+            let bucket = crate::data_store::store_name(instance);
+            let expected = data_mint::expected(instance, kept);
+            if data_mint::mints(instance) {
+                // A minted credential whose slot is gone is minted again, not refused.
+                if expected.is_some() {
+                    seen.publisher = data_publisher::observe(account, instance, &bucket, expected)
+                        .await
+                        .ok();
+                }
+                seen.mint_store = crate::secrets::linked_store(account).await?;
+                seen.mint_due = data_mint::due(
+                    kept.multipart.as_ref(),
+                    &bucket,
+                    seen.publisher.is_some(),
+                    worker::js_sys::Date::now() as i64,
+                );
+            } else {
+                seen.publisher =
+                    Some(data_publisher::observe(account, instance, &bucket, expected).await?);
+            }
         }
         if let Some(publisher) = seen.publisher.clone() {
             (seen.multipart_lifecycle, seen.stale_publisher_slots) =
@@ -1545,6 +1559,8 @@ fn data_step(step: &plan::Step) -> bool {
             | S::AddBucketNotification { .. }
             | S::SetMultipartLifecycle { .. }
             | S::RemovePublisherSlot { .. }
+            | S::MintPublisherToken { .. }
+            | S::RevokePublisherToken { .. }
             | S::RemoveStaleDns { .. }
             | S::EnableEmailRouting { .. }
             | S::SetCatchAll { .. }

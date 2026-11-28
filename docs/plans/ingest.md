@@ -1113,8 +1113,9 @@ instance ID. The second is the first 24 hex characters of the credential
 fingerprint. The linked Data plan checks the bucket's privacy and pins the
 store, slot, generation and fingerprint. Apply rechecks the metadata and binds
 the credential only to the standalone Data Worker. A rotation uses a new
-fingerprint, a new slot, and a new approved Data plan. Account-link OAuth
-authorizes the binding but cannot mint the R2 S3 parent credential.
+fingerprint, a new slot, and a new approved Data plan. With the optional
+Account API Tokens Write link scope and `data.multipart_mint`, an approved plan mints the
+bucket-scoped parent credential itself (multipart-enable.md, "Automatic").
 
 Multipart returns 503 before staging when the binding or exact credential
 fingerprint check fails. [multipart-enable.md](multipart-enable.md) covers the rest of the

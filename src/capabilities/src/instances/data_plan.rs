@@ -68,6 +68,12 @@ pub struct SeenData {
     /// Earlier publisher slots of this instance, `(id, name)`, which a bound plan removes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_publisher_slots: Vec<(String, String)>,
+    /// With `data.multipart_mint`: whether a token is due ([`super::data_mint::due`]), and
+    /// the linked Secrets Store its credential goes to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mint_due: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint_store: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_slots: Vec<String>,
     /// The email domain's zone id, when it is in the account.
@@ -389,11 +395,13 @@ pub fn data_parts(
         return blocked(format!("{name} is {}", super::plan::PLATFORM_OWNED));
     }
     let inline = crate::data_store::inline(instance);
+    let expected = super::data_mint::expected(instance, ledger);
     let publisher = seen
         .publisher
         .as_ref()
-        .filter(|p| p.applies_to(instance, &name));
-    if super::data_publisher::fingerprint(instance).is_some() && (inline || publisher.is_none()) {
+        .filter(|p| p.applies_to(instance, &name, expected));
+    let mints = super::data_mint::mints(instance);
+    if super::data_mint::wanted(instance) && (inline || (!mints && publisher.is_none())) {
         return blocked(
             "multipart publishing requires a standalone linked Data Worker, its existing private bucket, and its own publisher credential".into(),
         );
@@ -640,6 +648,27 @@ pub fn data_parts(
                         slot: slot.clone(),
                     });
                 }
+                for token in &ledger.multipart_retired {
+                    steps.push(Step::RevokePublisherToken {
+                        token: token.clone(),
+                        bucket: name.clone(),
+                    });
+                }
+            }
+            // Minting comes last, so the upload above still binds what was approved; the next
+            // plan binds the new token.
+            if mints && seen.mint_due {
+                steps.push(match &seen.mint_store {
+                    Some(store) => Step::MintPublisherToken {
+                        bucket: name.clone(),
+                        store: store.clone(),
+                    },
+                    None => Step::Blocked {
+                        why: "Set up the linked instance's Secrets Store for the minted \
+                              multipart publisher."
+                            .into(),
+                    },
+                });
             }
         }
     }

@@ -62,6 +62,16 @@ pub struct Ledger {
     /// Zones pigeon turned Email Routing on for, and whose catch-all it set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub email_zones: Vec<String>,
+    /// The multipart publisher token pigeon minted (`data.multipart_mint`): its id, never its
+    /// value (docs/plans/multipart-enable.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart: Option<super::data_mint::Minted>,
+    /// Earlier minted tokens, by id, that a plan binding the current one revokes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multipart_retired: Vec<String>,
+    /// Every mint and revoke, newest last (at most [`super::data_mint::AUDIT_KEPT`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multipart_audit: Vec<super::data_mint::AuditLine>,
 }
 
 /// The Directory key of instance `id`'s ledger.
@@ -285,6 +295,18 @@ pub enum Step {
         id: String,
         slot: String,
     },
+    /// Mint the bucket-scoped R2 token for the multipart publisher (`data.multipart_mint`) and
+    /// write its credential to the publisher slot in `store`. Its only policy is R2 object
+    /// read and write on exactly `bucket` (`data_mint::allowed_policy`).
+    MintPublisherToken {
+        bucket: String,
+        store: String,
+    },
+    /// Revoke an earlier minted publisher token, once the current one is bound.
+    RevokePublisherToken {
+        token: String,
+        bucket: String,
+    },
     /// Waits on the person; shown, and the plan goes on without it.
     Pending {
         what: String,
@@ -385,6 +407,8 @@ impl Step {
                 | Step::AddBucketNotification { .. }
                 | Step::SetMultipartLifecycle { .. }
                 | Step::RemovePublisherSlot { .. }
+                | Step::MintPublisherToken { .. }
+                | Step::RevokePublisherToken { .. }
                 | Step::RemoveStaleDns { .. }
                 | Step::EnableEmailRouting { .. }
                 | Step::SetCatchAll { .. }
@@ -1423,6 +1447,15 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
             )),
             Step::RemovePublisherSlot { slot, .. } => json!(format!(
                 "remove the earlier multipart publisher credential {slot} from the Secrets Store"
+            )),
+            Step::MintPublisherToken { bucket, .. } => json!(format!(
+                "mint a bucket-scoped R2 token for {bucket} (object read and write on that \
+                 bucket only, expiring in a year) with the link's Account API Tokens Write, \
+                 and store its credential in the Secrets Store for the Data Worker; the next \
+                 plan binds it"
+            )),
+            Step::RevokePublisherToken { token, bucket } => json!(format!(
+                "revoke the earlier minted R2 token {token} for {bucket}"
             )),
             Step::Pending { what, why } => json!(format!("pending: {what}: {why}")),
             Step::RemoveStaleDns {

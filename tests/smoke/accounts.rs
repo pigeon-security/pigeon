@@ -1286,6 +1286,7 @@ fn linking_a_cloudflare_account() {
         { "id": "d1.write", "name": "D1 Write" },
         { "id": "queues.write", "name": "Queues Write" },
         { "id": "containers.write", "name": "Workers Containers Write" },
+        { "id": "account-api-tokens.write", "name": "Account API Tokens Write" },
         { "id": "email-routing-rule.write", "name": "Email Routing Rules Write" },
         { "id": "email-routing-address.write", "name": "Email Routing Addresses Write" },
         { "id": "zone-settings.write", "name": "Zone Settings Write" },
@@ -1301,6 +1302,7 @@ fn linking_a_cloudflare_account() {
                 "D1 Write",
                 "Queues Write",
                 "Workers Containers Write",
+                "Account API Tokens Write",
                 "Email Routing Rules Write",
                 "Email Routing Addresses Write",
                 "Zone Settings Write"
@@ -1333,6 +1335,7 @@ fn linking_a_cloudflare_account() {
             "d1.write",
             "queues.write",
             "containers.write",
+            "account-api-tokens.write",
             "email-routing-rule.write",
             "email-routing-address.write",
             "zone-settings.write"
@@ -1350,6 +1353,7 @@ fn linking_a_cloudflare_account() {
             "data",
             "data backup",
             "data-ingest-backblaze-runtime",
+            "data multipart mint",
             "data-email",
             "data-email",
             "data-email"
@@ -2131,6 +2135,241 @@ fn multipart_enable_manual_key_lifecycle_and_canary() {
     )));
     assert!(Write::new(&write.key(), CANARY_BYTES, "c".repeat(64)).is_none());
     assert!(Write::canary("not-a-digest", "c".repeat(64)).is_none());
+}
+
+/// docs/plans/multipart-enable.md, slice b: pigeon mints only the one bucket-scoped shape,
+/// only as an approved plan step behind the optional scope, keeps no token value, binds the
+/// minted credential in the next plan, and revokes the earlier token on rotation.
+#[test]
+fn multipart_mint_is_bucket_scoped_planned_and_rotated() {
+    use pigeon_capabilities::data_store::placement_problems;
+    use pigeon_capabilities::instances::{
+        data_mint::{
+            self, Minted, SCOPE, allowed_policy, bucket_resource, due, groups, record_mint,
+            record_revoke, token_keys,
+        },
+        data_plan::{SeenData, data_steps},
+        data_publisher::{credential, slot_for},
+        plan::{Ledger, Step, describe},
+        record::Instance,
+    };
+    use pigeon_capabilities::linked::capability_refusal;
+
+    let account = "a".repeat(32);
+    let bucket = "example-data";
+    // The permission groups: exact names on the bucket scope, once each.
+    let listed = json!([
+        {"id": "w1", "name": "Workers R2 Storage Bucket Item Write", "scopes": ["com.cloudflare.edge.r2.bucket"]},
+        {"id": "r1", "name": "Workers R2 Storage Bucket Item Read", "scopes": ["com.cloudflare.edge.r2.bucket"]},
+        {"id": "x1", "name": "Workers R2 Storage Write", "scopes": ["com.cloudflare.api.account"]},
+        {"id": "w2", "name": "Workers R2 Storage Bucket Item Write", "scopes": ["com.cloudflare.api.account"]},
+    ]);
+    let ids = groups(&listed).unwrap();
+    assert_eq!(ids, ["w1".to_string(), "r1".to_string()]);
+    assert!(groups(&json!([listed[0]])).is_none());
+
+    // The one body: allowed; every widening refused.
+    let now = 1_795_800_000_000_i64;
+    let body = data_mint::body(&account, bucket, "example", &ids, now);
+    assert!(allowed_policy(&body, &account, bucket, &ids));
+    assert!(
+        body["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("pigeon-data-multipart-example-")
+    );
+    assert_eq!(
+        bucket_resource(&account, bucket),
+        format!("com.cloudflare.edge.r2.bucket.{account}_default_{bucket}")
+    );
+    let widened = |f: &dyn Fn(&mut Value)| {
+        let mut b = body.clone();
+        f(&mut b);
+        allowed_policy(&b, &account, bucket, &ids)
+    };
+    assert!(!widened(&|b| b["policies"][0]["resources"] =
+        json!({ format!("com.cloudflare.api.account.{account}"): "*" })));
+    assert!(!widened(&|b| b["policies"][0]["resources"]
+        [bucket_resource(&account, "other-bucket")] =
+        json!("*")));
+    assert!(!widened(
+        &|b| b["policies"][0]["resources"] = json!({ "com.cloudflare.edge.r2.bucket.*": "*" })
+    ));
+    assert!(!widened(&|b| b["policies"][0]["permission_groups"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "x1"}))));
+    assert!(!widened(
+        &|b| b["policies"][0]["permission_groups"] = json!([{"id": "w1"}, {"id": "x1"}])
+    ));
+    assert!(!widened(&|b| b["policies"][0]["effect"] = json!("deny")));
+    assert!(!widened(&|b| b["policies"]
+        .as_array_mut()
+        .unwrap()
+        .push(body["policies"][0].clone())));
+    assert!(!widened(&|b| b["condition"] = json!({})));
+    assert!(!widened(&|b| {
+        b.as_object_mut().unwrap().remove("expires_on");
+    }));
+    assert!(!allowed_policy(&body, &account, "other-bucket", &ids));
+    assert!(!allowed_policy(
+        &body,
+        &account,
+        bucket,
+        &["w1".into(), "w1".into()]
+    ));
+
+    // S3 keys as Cloudflare documents them; the credential and slot through the one builder.
+    let keys = token_keys("token-id", "token-value");
+    assert_eq!(keys.access_key_id, "token-id");
+    assert_eq!(
+        keys.secret_access_key,
+        pigeon_ingest::datastore::sha256_hex(b"token-value")
+    );
+    let (_, fingerprint) = credential(&account, bucket, &keys);
+
+    // The record opts in; the optional scope must be granted, or the plan says re-link.
+    let input = json!({
+        "id": "example", "title": "Example", "worker": "example-site",
+        "account": {"kind": "linked", "account_id": account},
+        "data": {"multipart_mint": true},
+    });
+    let instance: Instance = serde_json::from_value(input.clone()).unwrap();
+    assert!(placement_problems(&instance).is_empty());
+    let mut both = input.clone();
+    both["data"]["multipart_publisher"] = json!(fingerprint);
+    assert!(!placement_problems(&serde_json::from_value(both).unwrap()).is_empty());
+    let why = capability_refusal("example", SCOPE, Some("workers-r2.write")).unwrap();
+    assert!(why.contains("account-api-tokens.write"));
+    assert!(capability_refusal("example", SCOPE, Some("account-api-tokens.write")).is_none());
+
+    // Plan 1: nothing minted, so the plan mints (last) and binds nothing yet.
+    let mut ledger = Ledger {
+        buckets: vec![bucket.into()],
+        ..Default::default()
+    };
+    let mut seen = SeenData {
+        artifact: Some("worker-build".into()),
+        bucket_exists: true,
+        mint_due: due(None, bucket, false, now),
+        mint_store: Some("linked-store".into()),
+        ..Default::default()
+    };
+    let steps = data_steps(&instance, &seen, &ledger, None);
+    assert!(steps.iter().all(|s| !s.stops()));
+    assert!(steps.iter().any(
+        |s| matches!(s, Step::MintPublisherToken { bucket: b, store }
+        if b == bucket && store == "linked-store")
+    ));
+    assert!(!steps.iter().any(|s| matches!(
+        s,
+        Step::UploadDataWorker {
+            publisher: Some(_),
+            ..
+        }
+    )));
+    assert!(describe(&steps).iter().any(|l| {
+        l.as_str()
+            .unwrap()
+            .contains("mint a bucket-scoped R2 token for example-data")
+    }));
+
+    // Its apply records the id, never the value; plan 2 binds the minted fingerprint.
+    let day = 24 * 3_600_000;
+    let minted = |token: &str, fingerprint: &str, at: i64| Minted {
+        token: token.into(),
+        name: data_mint::token_name("example", at),
+        bucket: bucket.into(),
+        slot: slot_for("example", fingerprint),
+        fingerprint: fingerprint.into(),
+        minted_ms: at,
+        expires_ms: at + 365 * day,
+    };
+    record_mint(&mut ledger, minted("token-1", &fingerprint, now));
+    let kept = serde_json::to_string(&ledger).unwrap();
+    assert!(kept.contains("token-1") && !kept.contains("token-value"));
+    assert!(!kept.contains(&keys.secret_access_key));
+    assert_eq!(ledger.multipart_audit.len(), 1);
+    let publisher = |fp: &str| {
+        serde_json::from_value(json!({
+            "account": account, "bucket": bucket, "store": "linked-store",
+            "slot": slot_for("example", fp), "generation": "g", "fingerprint": fp,
+        }))
+        .unwrap()
+    };
+    seen.publisher = Some(publisher(&fingerprint));
+    seen.mint_due = due(ledger.multipart.as_ref(), bucket, true, now + day);
+    assert!(!seen.mint_due);
+    let steps = data_steps(&instance, &seen, &ledger, None);
+    assert!(steps.iter().any(|s| matches!(
+        s,
+        Step::UploadDataWorker {
+            publisher: Some(_),
+            ..
+        }
+    )));
+    assert!(!steps.iter().any(|s| matches!(
+        s,
+        Step::MintPublisherToken { .. } | Step::RevokePublisherToken { .. }
+    )));
+    // A publisher with any other fingerprint is not this instance's.
+    seen.publisher = Some(publisher(&"d".repeat(64)));
+    assert!(
+        !data_steps(&instance, &seen, &ledger, None)
+            .iter()
+            .any(|s| matches!(
+                s,
+                Step::UploadDataWorker {
+                    publisher: Some(_),
+                    ..
+                }
+            ))
+    );
+
+    // Rotation: near expiry the plan mints again; the next binds it and revokes the old one.
+    seen.publisher = Some(publisher(&fingerprint));
+    assert!(due(
+        ledger.multipart.as_ref(),
+        bucket,
+        true,
+        now + 340 * day
+    ));
+    assert!(due(ledger.multipart.as_ref(), bucket, false, now + day));
+    assert!(due(
+        ledger.multipart.as_ref(),
+        "other-bucket",
+        true,
+        now + day
+    ));
+    let next = "e".repeat(64);
+    record_mint(&mut ledger, minted("token-2", &next, now + 340 * day));
+    assert_eq!(ledger.multipart_retired, ["token-1"]);
+    seen.publisher = Some(publisher(&next));
+    seen.mint_due = false;
+    seen.stale_publisher_slots = vec![("old-id".into(), slot_for("example", &fingerprint))];
+    let steps = data_steps(&instance, &seen, &ledger, None);
+    let at = |f: &dyn Fn(&Step) -> bool| steps.iter().position(f).unwrap();
+    let upload = at(&|s| {
+        matches!(
+            s,
+            Step::UploadDataWorker {
+                publisher: Some(_),
+                ..
+            }
+        )
+    });
+    let revoke =
+        at(&|s| matches!(s, Step::RevokePublisherToken { token, .. } if token == "token-1"));
+    let remove = at(&|s| matches!(s, Step::RemovePublisherSlot { id, .. } if id == "old-id"));
+    assert!(upload < revoke && upload < remove);
+    record_revoke(&mut ledger, "token-1", bucket, now + 341 * day);
+    assert!(ledger.multipart_retired.is_empty());
+    let actions: Vec<&str> = ledger
+        .multipart_audit
+        .iter()
+        .map(|l| l.action.as_str())
+        .collect();
+    assert_eq!(actions, ["minted", "minted", "revoked"]);
 }
 
 #[test]

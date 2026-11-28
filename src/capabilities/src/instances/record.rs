@@ -182,6 +182,10 @@ pub struct CapabilitySettings {
     /// SHA-256 of the exact credential JSON in the linked Data Worker's Secrets Store slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipart_publisher: Option<String>,
+    /// `data` only: pigeon mints the publisher credential itself, as a bucket-scoped R2 token
+    /// in the linked account, inside an approved plan (docs/plans/multipart-enable.md).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multipart_mint: bool,
     /// `data` only: the approved external storage location its read tools also read
     /// (`data.read`; the `storage` profile before docs/plans/record-reshape.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]

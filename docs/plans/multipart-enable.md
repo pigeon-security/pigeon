@@ -47,9 +47,14 @@ no tool that mints. Applying it:
 3. creates the account-owned token `pigeon-data-multipart-<instance>-<date>` expiring in 365
    days, derives the S3 keys as Cloudflare documents (Access Key ID = token id; Secret =
    SHA-256 hex of the token value), builds the JSON, fingerprint and slot, and writes the slot;
-4. records the token's id (never its value), fingerprint, slot and expiry in the instance's
-   ledger, and appends a `multipart_token_minted` line to the instance's audit (the ledger's
-   `multipart_audit`, shown by `instance_plan`).
+4. records the token's id (never its value), name, fingerprint, slot and expiry in the
+   instance's ledger (`multipart`), retires the previous token for revoke
+   (`multipart_retired`), and appends a `minted` line to the ledger's `multipart_audit`
+   (the last 50 mints and revokes, each with time, token id and bucket).
+
+The mint step is the plan's last data step, so an upload earlier in the same plan still binds
+exactly what was approved; the apply re-checks that the record still asks for minting and
+that the bucket is the instance's own.
 
 The token value and the derived secret exist only inside that apply: they are never in a tool
 result, record, ledger, approval or log. A minted publisher's fingerprint comes from the
@@ -98,8 +103,8 @@ processes only those keys; `skip_over` is not set.
 
 | Slice | What | State |
 | --- | --- | --- |
-| a | Credential builder, manual verify-and-write, console flow, lifecycle step, stale-slot removal, Data Worker canary, readiness gated on it, `data_ingest_multipart_check` | building |
-| b | `multipart_mint`, optional scope, mint step, ledger and audit, revoke on rotation | planned |
+| a | Credential builder, manual verify-and-write, console flow, lifecycle step, stale-slot removal, Data Worker canary, readiness gated on it, `data_ingest_multipart_check` | landing (pUsOJDxbNd039cfH) |
+| b | `multipart_mint`, optional scope, mint step, ledger and audit, revoke on rotation, console opt-in | building |
 | c | `continue` + `only: "too_large"` | planned |
 
 ## Log

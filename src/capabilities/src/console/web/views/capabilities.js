@@ -569,6 +569,21 @@
     });
   }
 
+  // The automatic path: the record opts in to data.multipart_mint; the link must also grant
+  // Account API Tokens Write (re-link). Each mint is a step of a plan the person approves.
+  async function mintLargeFileKey(ctx, record) {
+    const current = await recordOf(ctx);
+    const next = clone(current);
+    next.data = { ...(next.data || {}), multipart_mint: true };
+    putRecord(ctx, {
+      record: current, next,
+      title: "Let pigeon mint the large-file key",
+      target: [["Data bucket", code(`${record.id}-data`)]],
+      effect: "Pigeon then mints one Cloudflare API token in this account with R2 object read and write on the Data bucket only, as a step of a plan you approve; a second plan binds it. This needs the link's optional Account API Tokens Write scope, which can create API tokens in the account: re-link and allow it, or use your own key instead.",
+      confirmLabel: "Approve record change with passkey",
+    });
+  }
+
   function digitalOceanConnection(ctx, record, spaces = false) {
     const args = { instance: record.id };
     const teamId = record.cloud.digitalocean.team_id;
@@ -789,6 +804,8 @@
             c.cap === "data-ingest" ? button("Bucket connections", () => ingestBucketConnections(ctx, record), sm) : null,
             c.cap === "data-ingest" && record.account?.kind === "linked"
               ? button(record.data?.multipart_publisher ? "Rotate large-file key" : "Enable large-file uploads", () => largeFileUploads(ctx, record), sm) : null,
+            c.cap === "data-ingest" && record.account?.kind === "linked" && !record.data?.multipart_mint && !record.data?.multipart_publisher
+              ? button("Let pigeon mint the large-file key", () => mintLargeFileKey(ctx, record), { ...sm, variant: "ghost" }) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
             c.cap === "digitalocean" && record.cloud.digitalocean.droplet_health
               ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,

@@ -568,6 +568,7 @@ pub async fn run(
                         backup: backup.is_some(),
                         ingest_runtime: ingest_runtime.as_ref(),
                         publisher: publisher.as_ref(),
+                        expected: super::data_mint::expected(instance, ledger).map(str::to_string),
                         scaleway_compute: scaleway_compute.as_ref(),
                         digitalocean_compute: digitalocean_compute.as_deref(),
                     },
@@ -678,6 +679,40 @@ pub async fn run(
                 )
                 .await?;
                 format!("removed the earlier multipart publisher credential {slot}")
+            }
+            Step::MintPublisherToken { bucket, store } => {
+                // Only the instance's own Data bucket, and only while its record asks for it.
+                if !super::data_mint::mints(instance) || *bucket != name {
+                    return Err(bad("the approved minted publisher changed: plan again"));
+                }
+                let minted = super::data_mint::mint(
+                    t,
+                    acc,
+                    &instance.id,
+                    bucket,
+                    store,
+                    worker::js_sys::Date::now() as i64,
+                )
+                .await?;
+                let line = format!(
+                    "minted bucket-scoped R2 token {} ({}) for {bucket}; plan again to bind it",
+                    minted.name, minted.token
+                );
+                super::data_mint::record_mint(ledger, minted);
+                line
+            }
+            Step::RevokePublisherToken { token, bucket } => {
+                if !ledger.multipart_retired.contains(token) {
+                    return Err(bad("that token is not one pigeon retired: plan again"));
+                }
+                super::data_mint::revoke(t, acc, token).await?;
+                super::data_mint::record_revoke(
+                    ledger,
+                    token,
+                    bucket,
+                    worker::js_sys::Date::now() as i64,
+                );
+                format!("revoked the earlier minted R2 token {token}")
             }
             Step::RemoveStaleDns {
                 zone_id,
@@ -995,6 +1030,8 @@ struct UploadOptions<'a> {
     backup: bool,
     ingest_runtime: Option<&'a pigeon_ingest::container_job::Runtime>,
     publisher: Option<&'a super::data_publisher::Publisher>,
+    /// The fingerprint the publisher must have now (`data_mint::expected`).
+    expected: Option<String>,
     scaleway_compute: Option<&'a crate::ingest::scaleway_compute::Registry>,
     digitalocean_compute: Option<&'a crate::ingest::digitalocean_compute::Registry>,
 }
@@ -1013,6 +1050,7 @@ async fn upload(
         backup,
         ingest_runtime,
         publisher,
+        expected,
         scaleway_compute,
         digitalocean_compute,
     } = options;
@@ -1023,7 +1061,7 @@ async fn upload(
         bearer: Some(a.token.to_string()),
         token_ledger: None,
     };
-    super::data_publisher::verify(&account, instance, name, publisher).await?;
+    super::data_publisher::verify(&account, instance, name, publisher, expected.as_deref()).await?;
     let audit_bucket = if (backup && instance.account != crate::instances::record::AccountRef::Home)
         || crate::data_store::mail_import_audit_bucket(instance).is_some()
     {

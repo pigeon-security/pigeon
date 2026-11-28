@@ -17,11 +17,13 @@ pub struct Publisher {
 }
 
 impl Publisher {
-    pub fn applies_to(&self, instance: &Instance, bucket: &str) -> bool {
+    /// Whether it is `instance`'s publisher for `bucket` with the `expected` fingerprint
+    /// (`data_mint::expected`: the record's, or the minted token's).
+    pub fn applies_to(&self, instance: &Instance, bucket: &str, expected: Option<&str>) -> bool {
         matches!(&instance.account, AccountRef::Linked { account_id }
             if account_id.as_deref() == Some(self.account.as_str()))
             && self.bucket == bucket
-            && fingerprint(instance) == Some(self.fingerprint.as_str())
+            && expected == Some(self.fingerprint.as_str())
     }
 }
 
@@ -241,8 +243,13 @@ fn bad(message: impl Into<String>) -> Error {
     Error::RustError(message.into())
 }
 
-pub async fn observe(account: &Account, instance: &Instance, bucket: &str) -> Result<Publisher> {
-    let fingerprint = fingerprint(instance)
+pub async fn observe(
+    account: &Account,
+    instance: &Instance,
+    bucket: &str,
+    expected: Option<&str>,
+) -> Result<Publisher> {
+    let fingerprint = expected
         .filter(|hash| pigeon_ingest::managed_destination::digest(hash))
         .ok_or_else(|| {
             bad("set the lowercase SHA-256 fingerprint of the multipart publisher credential")
@@ -352,10 +359,13 @@ pub async fn verify(
     instance: &Instance,
     bucket: &str,
     approved: Option<&Publisher>,
+    expected: Option<&str>,
 ) -> Result<()> {
     match approved {
-        Some(expected) if observe(account, instance, bucket).await? == *expected => Ok(()),
-        None if fingerprint(instance).is_none() => Ok(()),
+        Some(publisher) if observe(account, instance, bucket, expected).await? == *publisher => {
+            Ok(())
+        }
+        None if expected.is_none() || super::data_mint::mints(instance) => Ok(()),
         _ => Err(bad("the approved multipart publisher changed: plan again")),
     }
 }

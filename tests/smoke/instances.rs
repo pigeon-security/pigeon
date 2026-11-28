@@ -1401,7 +1401,7 @@ fn secrets_on_a_linked_instance() {
 
     // The scope: granted, not granted, or not reported.
     let full = "account-settings.read zone.read secrets-store.write d1.write queues.write containers.write \
-                email-routing-rule.write email-routing-address.write zone-settings.write offline_access";
+                account-api-tokens.write email-routing-rule.write email-routing-address.write zone-settings.write offline_access";
     let old = "account-settings.read zone.read dns.write offline_access";
     assert_eq!(grants(Some(full), "secrets-store.write"), Some(true));
     assert_eq!(grants(Some(old), "secrets-store.write"), Some(false));
@@ -1423,6 +1423,7 @@ fn secrets_on_a_linked_instance() {
             "data",
             "data backup",
             "data-ingest-backblaze-runtime",
+            "data multipart mint",
             "data-email"
         ]
     );

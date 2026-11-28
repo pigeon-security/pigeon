@@ -174,6 +174,16 @@ pub fn placement_problems(record: &Instance) -> Vec<String> {
             );
         }
     }
+    if s.multipart_mint {
+        if s.multipart_publisher.is_some() {
+            out.push("Choose one multipart publisher: a minted one (data.multipart_mint) or your own key (data.multipart_publisher).".into());
+        }
+        if record.account == AccountRef::Home || inline(record) {
+            out.push(
+                "Multipart publishing requires a linked Data Worker on its own Worker.".into(),
+            );
+        }
+    }
     if let Some(e) = crate::email::settings(record)
         && let Some(p) = e.placement
         && p != placement(record)

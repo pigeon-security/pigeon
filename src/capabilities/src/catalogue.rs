@@ -588,7 +588,8 @@ pub fn problems(record: &Instance) -> Vec<String> {
             ));
         }
         if name != crate::data_store::NAME
-            && record.capabilities[name].multipart_publisher.is_some()
+            && (record.capabilities[name].multipart_publisher.is_some()
+                || record.capabilities[name].multipart_mint)
         {
             out.push(format!(
                 "The capability \"{name}\" does not accept a Data multipart publisher."
