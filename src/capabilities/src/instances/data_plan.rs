@@ -46,6 +46,7 @@ pub struct SeenData {
     pub ingest_container: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaleway_compute: Option<crate::ingest::scaleway_compute::Registry>,
+    pub digitalocean_compute: Option<crate::ingest::digitalocean_compute::Registry>,
     /// The digest of the newest data Worker build pigeon holds, if any.
     pub artifact: Option<String>,
     /// The digest of the email configuration row, if there is one.
@@ -564,6 +565,15 @@ pub fn data_parts(
                 ),
                 None => module,
             };
+            let module = match &seen.digitalocean_compute {
+                Some(compute) => pigeon_core::oauth::hash(
+                    &json!({
+                        "data_worker": module, "digitalocean_compute": compute,
+                    })
+                    .to_string(),
+                ),
+                None => module,
+            };
             let uploaded = ledger
                 .workers
                 .iter()
@@ -580,6 +590,7 @@ pub fn data_parts(
                 ingest_runtime: ingest_runtime.cloned(),
                 publisher: publisher.cloned(),
                 scaleway_compute: seen.scaleway_compute.clone(),
+                digitalocean_compute: seen.digitalocean_compute.clone().map(Box::new),
                 module: module.clone(),
                 replaces,
             };

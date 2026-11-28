@@ -399,6 +399,22 @@ team and Spaces source. Changing the approved source requires verifying
 and saving the key for the new binding. This rollout does not grant
 DigitalOcean write permissions or provision compute.
 
+## Instance-owned compute for named DigitalOcean Spaces ingest
+
+Open the named Spaces connection under Data Ingest. Use its owning-account
+source slot and apply the linked instance's standalone Data Worker plan.
+For **Register compute key**, create the displayed slot directly in the
+linked Cloudflare account's Secrets Store with Workers scope. Its value is the
+DigitalOcean team PAT for compute. Use a separate PAT from the Spaces access
+key. The PAT needs account read, tagged Droplet create, read and delete, and
+Block Storage volume create, read and delete.
+
+Approve the slot metadata with your passkey, then review and apply the new Data
+Worker plan. Planning a named run verifies the approved team and Block Storage read scope
+from within that worker. The run holds the approved credential generation and
+worker address through bootstrap and cleanup. Earlier run generations stay
+bound for cleanup after rotation. Use a new slot for each generation.
+
 ## DigitalOcean temporary Droplet health check, phase 3
 
 Enable `capabilities.digitalocean.droplet_health: true` in an approved instance

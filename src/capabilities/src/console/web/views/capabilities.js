@@ -471,7 +471,10 @@
     }
 
     function editCompute({ name, binding, compute }, version) {
-      const target = [["Instance", code(record.id)], ["Connection", code(name)], ["Project", code(binding.project)],
+      const spaces = binding.provider === "digitalocean";
+      const provider = spaces ? "DigitalOcean" : "Scaleway";
+      const target = [["Instance", code(record.id)], ["Connection", code(name)],
+        spaces ? ["Team", code(compute.team)] : ["Project", code(binding.project)],
         ["Secrets Store slot", code(compute.slot)]];
       const review = button("Review registration", async () => {
         review.disabled = true;
@@ -483,8 +486,8 @@
           }
           entry.close();
           confirm({
-            title: "Register Scaleway compute key", target,
-            action: "data-ingest-scaleway-compute-register",
+            title: `Register ${provider} compute key`, target,
+            action: `data-ingest-${binding.provider}-compute-register`,
             id: { instance: record.id, name, version, generation: current.generation, fingerprint: current.fingerprint },
             confirmLabel: "Register with passkey",
             onDone: () => setTimeout(() => ingestBucketConnections(ctx, record), 0),
@@ -495,9 +498,9 @@
           review.disabled = false;
         }
       }, { variant: "primary" });
-      const entry = dialog({ title: "Scaleway compute key", body: [
+      const entry = dialog({ title: `${provider} compute key`, body: [
         facts(target),
-        el("p", { text: "In the linked Cloudflare account, create this exact secret in Secrets Store with Workers scope. Its value is PROJECT_ID:SECRET_KEY. Use a new slot for each rotation." }),
+        el("p", { text: `In the linked Cloudflare account, create this exact secret in Secrets Store with Workers scope. Its value is ${spaces ? "the team compute token" : "PROJECT_ID:SECRET_KEY"}. Use a new slot for each rotation.` }),
       ], actions: [button("Back", () => ingestBucketConnections(ctx, record)), review] });
     }
 

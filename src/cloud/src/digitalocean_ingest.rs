@@ -1,5 +1,6 @@
 //! DigitalOcean resources owned by a single bounded ingest job.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Error, Result};
 
@@ -107,14 +108,16 @@ impl<'a> Target<'a> {
 }
 
 /// A create request is sent once. An ambiguous result requires reconciliation by identity.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Created<T> {
     Accepted(T),
     Rejected(u16),
     Unknown,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Removal {
     Absent,
     Requested,

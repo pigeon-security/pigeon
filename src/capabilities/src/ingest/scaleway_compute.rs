@@ -141,7 +141,7 @@ async fn registration_account(cx: &Context<'_>, record: &Instance) -> Result<pig
     Ok(account)
 }
 
-fn metadata_fingerprint(secret: &pigeon_core::secrets_store::Secret) -> Option<String> {
+pub(crate) fn metadata_fingerprint(secret: &pigeon_core::secrets_store::Secret) -> Option<String> {
     let modified = secret
         .modified
         .as_deref()

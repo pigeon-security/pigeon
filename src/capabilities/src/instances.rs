@@ -953,6 +953,12 @@ impl Instances {
             crate::ingest::scaleway_compute::verify_registry(account, &instance.id, registry)
                 .await?;
         }
+        seen.digitalocean_compute =
+            crate::ingest::digitalocean_compute::registry(cx.env, &instance.id).await?;
+        if let Some(registry) = &seen.digitalocean_compute {
+            crate::ingest::digitalocean_compute::verify_registry(account, &instance.id, registry)
+                .await?;
+        }
         Ok(data_plan::data_parts(instance, &seen, kept, None))
     }
 

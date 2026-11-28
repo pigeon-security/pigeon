@@ -214,7 +214,7 @@ pub fn write_need(action: &Action, target: &Value) -> Need {
         Target::Site
         | Target::DigitalOceanTeam
         | Target::IngestConnection
-        | Target::ScalewayCompute => target["instance"].as_str(),
+        | Target::IngestCompute => target["instance"].as_str(),
         _ => None,
     };
     Need::On(instance.map(str::to_string), Role::Operator)

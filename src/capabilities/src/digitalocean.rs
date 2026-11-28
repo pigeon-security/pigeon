@@ -14,6 +14,7 @@ use crate::instances::{
 };
 use crate::{Call, Capability, Context, catalogue, users::directory};
 
+pub mod compute;
 pub mod health;
 pub mod spaces;
 

@@ -1,7 +1,10 @@
 //! Passkey approval, bootstrap, and scheduled cleanup for a Spaces data ingest.
 
 use pigeon_cloud::{
-    digitalocean_ingest as provider, digitalocean_spaces::Binding, transport::FetchTransport,
+    digitalocean_compute::{Command, Lookup},
+    digitalocean_ingest as provider,
+    digitalocean_spaces::Binding,
+    transport::FetchTransport,
 };
 use pigeon_core::{
     approval::{Kind, payload_digest},
@@ -24,7 +27,7 @@ use super::{KEPT_MS, KIND, RunRecord, UNIQUE_SHARE, bad, hosts, secret_value, se
 use super::{connections, managed_destination};
 use crate::{
     Context, data_store,
-    digitalocean::{health, spaces, team},
+    digitalocean::{compute, health, spaces, team},
     instances::{self, record::Instance},
     jobs_audit::{self, ExportStatus},
     users::directory,
@@ -57,6 +60,8 @@ struct Planned {
     source_origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     destination: Option<managed_destination::Reviewed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compute: Option<compute::Broker>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -95,6 +100,38 @@ struct Run {
     terminal: Option<PipelineTerminal>,
     audit: ExportStatus,
     retrying: bool,
+}
+
+enum Computer {
+    Owned(compute::Broker),
+    Legacy(String),
+}
+
+impl Computer {
+    async fn for_run(env: &Env, job: &Run) -> Result<Self> {
+        match (&job.plan.compute, &job.credential) {
+            (Some(broker), None) => Ok(Self::Owned(broker.clone())),
+            (None, Some(credential)) => Ok(Self::Legacy(
+                health::open(env, &job.plan.job.instance, credential).await?,
+            )),
+            _ => Err(bad(
+                "The run has no unique DigitalOcean compute credential.",
+            )),
+        }
+    }
+
+    async fn call<T: serde::de::DeserializeOwned>(
+        &self,
+        env: &Env,
+        instance: &str,
+        command: Command,
+        legacy: impl AsyncFnOnce(&str) -> Result<T>,
+    ) -> Result<T> {
+        match self {
+            Self::Owned(broker) => broker.command(env, instance, command).await,
+            Self::Legacy(token) => legacy(token).await,
+        }
+    }
 }
 
 fn now() -> u64 {
@@ -196,24 +233,6 @@ fn bound(record: &Instance, plan: &Planned) -> bool {
                 && spaces::allows_prefix(&binding.prefix, prefix))
 }
 
-async fn list_spaces(binding: &Binding, prefix: &str, keys: &s3::Keys) -> Result<s3::Listing> {
-    let endpoint = s3::Endpoint {
-        base: format!("https://{}.digitaloceanspaces.com", binding.region),
-        region: binding.region.clone(),
-    };
-    let query = s3::list_objects_query(Some(prefix).filter(|p| !p.is_empty()), None, 1000, None);
-    let mut response = s3::send(
-        Method::Get,
-        &endpoint,
-        &s3::object_path(&binding.bucket, ""),
-        &query,
-        &[],
-        keys,
-    )
-    .await?;
-    s3::parse_list_objects(&response.text().await?)
-}
-
 fn volume_bytes(gib: u16) -> u64 {
     // Reserve 20% of the provisioned GiB for filesystem overhead.
     u64::from(gib) * (1 << 30) * 4 / 5
@@ -304,8 +323,11 @@ pub(super) async fn plan(
                 Some(origin),
             )
         } else {
-            let (pin, keys) = connections::open(cx.env, record, name).await?;
-            (list_spaces(binding, prefix, &keys).await, Some(pin), None)
+            return Ok(unready(
+                vec!["Stage the owning-account Spaces key and apply its Data Worker plan before starting a named run.".into()],
+                Value::Null,
+                Value::Null,
+            ));
         }
     } else {
         (
@@ -395,22 +417,33 @@ pub(super) async fn plan(
         }
         None
     };
-    match health::for_ingest(cx.env, record).await {
-        Ok(credential) => {
-            let pat = health::open(cx.env, &record.id, &credential).await?;
-            let target = provider::Target::new(&run_id, &binding.region)?;
-            if provider::find_volume(&FetchTransport, &pat, &target)
-                .await
-                .is_err()
-            {
-                missing
-                    .push("The saved compute key cannot read DigitalOcean Block Storage.".into());
+    let compute = if connection.is_some() {
+        match super::digitalocean_compute::ready(cx.env, record, &binding.region).await {
+            Ok(broker) => Some(broker),
+            Err(error) => {
+                missing.push(error.to_string());
+                None
             }
         }
-        Err(_) => {
-            missing.push("Configure the instance's DigitalOcean compute credential first.".into())
+    } else {
+        match health::for_ingest(cx.env, record).await {
+            Ok(credential) => {
+                let pat = health::open(cx.env, &record.id, &credential).await?;
+                let target = provider::Target::new(&run_id, &binding.region)?;
+                if provider::find_volume(&FetchTransport, &pat, &target)
+                    .await
+                    .is_err()
+                {
+                    missing.push(
+                        "The saved compute key cannot read DigitalOcean Block Storage.".into(),
+                    );
+                }
+            }
+            Err(_) => missing
+                .push("Configure the instance's DigitalOcean compute credential first.".into()),
         }
-    }
+        None
+    };
     let commit = match super::Ingest::commit(args) {
         Ok(commit) if source_origin.is_some() && option_env!("PIGEON_COMMIT") != Some(&commit) => {
             missing.push("Use this deployed revision for an owning-account Spaces runner.".into());
@@ -467,6 +500,7 @@ pub(super) async fn plan(
         connection,
         source_origin,
         destination,
+        compute,
     };
     let mut summary = json!({
         "instance": record.id,
@@ -480,6 +514,13 @@ pub(super) async fn plan(
         ],
         "estimate":est,
     });
+    if let Some(broker) = &approval.compute {
+        summary["compute"] = json!({
+            "owner": "linked_instance",
+            "team": broker.pin.team,
+            "generation": broker.pin.generation,
+        });
+    }
     if let Some(reviewed) = &approval.destination {
         let grant = format!(
             "Use a Data Worker run grant limited to {} write bytes, {} write attempts and 16 MiB per atomic payload.",
@@ -601,7 +642,24 @@ pub(super) async fn start(
         ));
     }
     let link = crate::linked::account_for_bound(env, host, &record.id, &p.account).await?;
-    let credential = health::for_ingest(env, &record).await?;
+    let credential = match (&p.connection, &p.compute) {
+        (Some(_), Some(reviewed)) if p.source_origin.is_some() => {
+            let binding = source_binding(&record, p.connection.as_ref())?;
+            if &super::digitalocean_compute::ready(env, &record, &binding.region).await? != reviewed
+            {
+                return Err(bad(
+                    "The approved DigitalOcean compute generation changed. Plan again.",
+                ));
+            }
+            None
+        }
+        (None, None) => Some(health::for_ingest(env, &record).await?),
+        _ => {
+            return Err(bad(
+                "Plan the Spaces run again with an instance-owned compute credential.",
+            ));
+        }
+    };
     match (&p.connection, p.source_origin.as_deref()) {
         (Some(pin), Some(origin))
             if connections::owned_origin(env, &record, pin).await? == origin => {}
@@ -651,7 +709,7 @@ pub(super) async fn start(
     let time = now();
     let record = Run {
         approval: id.into(),
-        credential: Some(credential),
+        credential,
         started_ms: time,
         next_ms: time,
         deadline_ms: time + u64::from(p.max_minutes) * MINUTE_MS,
@@ -909,13 +967,21 @@ pub async fn bootstrap(env: &Env, host: &str, mut request: Request) -> Result<Re
     else {
         return Response::error("Unauthorized", 401);
     };
-    let credential = job
-        .credential
-        .as_ref()
-        .ok_or_else(|| bad("The compute credential is unavailable."))?;
-    let pat = health::open(env, &job.plan.job.instance, credential).await?;
+    let computer = Computer::for_run(env, &job).await?;
     let target = provider::Target::new(&job.plan.job.run, &binding.region)?;
-    match provider::public_ipv4(&FetchTransport, &pat, &target, id).await? {
+    let address = computer
+        .call(
+            env,
+            &job.plan.job.instance,
+            Command::DropletIp {
+                run: job.plan.job.run.clone(),
+                region: binding.region.clone(),
+                id,
+            },
+            async |pat| provider::public_ipv4(&FetchTransport, pat, &target, id).await,
+        )
+        .await?;
+    match address {
         None => return Response::error("Retry provisioned runner", 409),
         Some(address) if address != peer => return Response::error("Unauthorized", 401),
         Some(_) => {}
@@ -1052,11 +1118,9 @@ async fn step(env: &Env, host: &str, prior: &mut String, job: &mut Run) -> Resul
         _ => return Err(bad("The DigitalOcean run does not have a Spaces source.")),
     };
     let target = provider::Target::new(&job.plan.job.run, &region)?;
-    let credential = job
-        .credential
-        .as_ref()
-        .ok_or_else(|| bad("The compute credential is unavailable."))?;
-    let pat = health::open(env, &job.plan.job.instance, credential).await?;
+    let computer = Computer::for_run(env, job).await?;
+    let run = job.plan.job.run.clone();
+    let instance = job.plan.job.instance.clone();
     if now() >= job.deadline_ms && job.outcome.is_none() {
         cleanup(job, PipelineOutcome::TimedOut);
     }
@@ -1068,8 +1132,23 @@ async fn step(env: &Env, host: &str, prior: &mut String, job: &mut Run) -> Resul
                 return Ok(());
             };
             *prior = armed;
-            match provider::create_volume(&FetchTransport, &pat, &target, job.plan.volume_gib).await
-            {
+            let gib = job.plan.volume_gib;
+            let created = computer
+                .call(
+                    env,
+                    &instance,
+                    Command::CreateVolume {
+                        run: run.clone(),
+                        region: region.clone(),
+                        gib,
+                    },
+                    async |pat| {
+                        Ok(provider::create_volume(&FetchTransport, pat, &target, gib).await)
+                    },
+                )
+                .await
+                .unwrap_or(provider::Created::Unknown);
+            match created {
                 provider::Created::Accepted(id) => {
                     job.volume = Some(id);
                     job.stage = Stage::QueueDroplet;
@@ -1082,7 +1161,23 @@ async fn step(env: &Env, host: &str, prior: &mut String, job: &mut Run) -> Resul
             }
         }
         Stage::FindVolume => {
-            if let Some(volume) = provider::find_volume(&FetchTransport, &pat, &target).await? {
+            if let Lookup::Found(volume) = computer
+                .call(
+                    env,
+                    &instance,
+                    Command::FindVolume {
+                        run: run.clone(),
+                        region: region.clone(),
+                        fence: false,
+                    },
+                    async |pat| {
+                        Ok(provider::find_volume(&FetchTransport, pat, &target)
+                            .await?
+                            .into())
+                    },
+                )
+                .await?
+            {
                 job.volume = Some(volume);
                 job.stage = Stage::QueueDroplet;
             }
@@ -1101,7 +1196,30 @@ async fn step(env: &Env, host: &str, prior: &mut String, job: &mut Run) -> Resul
                 return Ok(());
             };
             *prior = armed;
-            match provider::create_droplet(&FetchTransport, &pat, &target, &volume, &script).await {
+            let created = computer
+                .call(
+                    env,
+                    &instance,
+                    Command::CreateDroplet {
+                        run: run.clone(),
+                        region: region.clone(),
+                        volume: volume.clone(),
+                        script: script.clone(),
+                    },
+                    async |pat| {
+                        Ok(provider::create_droplet(
+                            &FetchTransport,
+                            pat,
+                            &target,
+                            &volume,
+                            &script,
+                        )
+                        .await)
+                    },
+                )
+                .await
+                .unwrap_or(provider::Created::Unknown);
+            match created {
                 provider::Created::Accepted(id) => {
                     job.droplet = Some(id);
                     job.stage = Stage::Running;
@@ -1114,7 +1232,23 @@ async fn step(env: &Env, host: &str, prior: &mut String, job: &mut Run) -> Resul
             }
         }
         Stage::FindDroplet => {
-            if let Some(id) = provider::find_droplet(&FetchTransport, &pat, &target).await? {
+            if let Lookup::Found(id) = computer
+                .call(
+                    env,
+                    &instance,
+                    Command::FindDroplet {
+                        run: run.clone(),
+                        region: region.clone(),
+                        fence: false,
+                    },
+                    async |pat| {
+                        Ok(provider::find_droplet(&FetchTransport, pat, &target)
+                            .await?
+                            .into())
+                    },
+                )
+                .await?
+            {
                 job.droplet = Some(id);
                 job.stage = Stage::Running;
             }
@@ -1135,13 +1269,43 @@ async fn step(env: &Env, host: &str, prior: &mut String, job: &mut Run) -> Resul
         }
         Stage::CleanupDroplet => {
             if job.droplet.is_none() && job.droplet_attempt_ms.is_some() {
-                job.droplet = provider::find_droplet(&FetchTransport, &pat, &target).await?;
-                if job.droplet.is_none() {
-                    return Ok(());
+                match computer
+                    .call(
+                        env,
+                        &instance,
+                        Command::FindDroplet {
+                            run: run.clone(),
+                            region: region.clone(),
+                            fence: true,
+                        },
+                        async |pat| {
+                            Ok(provider::find_droplet(&FetchTransport, pat, &target)
+                                .await?
+                                .into())
+                        },
+                    )
+                    .await?
+                {
+                    Lookup::Found(resource) => job.droplet = Some(resource),
+                    Lookup::NeverCreated => job.droplet_attempt_ms = None,
+                    Lookup::Unresolved => return Ok(()),
                 }
             }
             if let Some(id) = job.droplet {
-                if provider::remove_droplet(&FetchTransport, &pat, &target, id).await?
+                if computer
+                    .call(
+                        env,
+                        &instance,
+                        Command::RemoveDroplet {
+                            run: run.clone(),
+                            region: region.clone(),
+                            id,
+                        },
+                        async |pat| {
+                            provider::remove_droplet(&FetchTransport, pat, &target, id).await
+                        },
+                    )
+                    .await?
                     != provider::Removal::Absent
                 {
                     return Ok(());
@@ -1152,13 +1316,43 @@ async fn step(env: &Env, host: &str, prior: &mut String, job: &mut Run) -> Resul
         }
         Stage::CleanupVolume => {
             if job.volume.is_none() && job.volume_attempt_ms.is_some() {
-                job.volume = provider::find_volume(&FetchTransport, &pat, &target).await?;
-                if job.volume.is_none() {
-                    return Ok(());
+                match computer
+                    .call(
+                        env,
+                        &instance,
+                        Command::FindVolume {
+                            run: run.clone(),
+                            region: region.clone(),
+                            fence: true,
+                        },
+                        async |pat| {
+                            Ok(provider::find_volume(&FetchTransport, pat, &target)
+                                .await?
+                                .into())
+                        },
+                    )
+                    .await?
+                {
+                    Lookup::Found(resource) => job.volume = Some(resource),
+                    Lookup::NeverCreated => job.volume_attempt_ms = None,
+                    Lookup::Unresolved => return Ok(()),
                 }
             }
             if let Some(id) = &job.volume {
-                if provider::remove_volume(&FetchTransport, &pat, &target, id).await?
+                if computer
+                    .call(
+                        env,
+                        &instance,
+                        Command::RemoveVolume {
+                            run: run.clone(),
+                            region: region.clone(),
+                            id: id.clone(),
+                        },
+                        async |pat| {
+                            provider::remove_volume(&FetchTransport, pat, &target, id).await
+                        },
+                    )
+                    .await?
                     != provider::Removal::Absent
                 {
                     return Ok(());

@@ -241,6 +241,8 @@ pub enum Step {
         publisher: Option<super::data_publisher::Publisher>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scaleway_compute: Option<crate::ingest::scaleway_compute::Registry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        digitalocean_compute: Option<Box<crate::ingest::digitalocean_compute::Registry>>,
         module: String,
         replaces: bool,
     },

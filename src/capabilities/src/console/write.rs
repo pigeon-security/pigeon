@@ -60,7 +60,7 @@ pub enum Target {
     DigitalOceanTeam,
     /// A named Data Ingest connection and its current generation.
     IngestConnection,
-    ScalewayCompute,
+    IngestCompute,
     /// A person's name, as an invite takes it.
     Name,
     /// `on` or `off`.
@@ -193,7 +193,15 @@ pub const ACTIONS: &[Action] = &[
         "Register a Scaleway compute credential",
         Cap(crate::ingest::NAME),
         false,
-        Target::ScalewayCompute,
+        Target::IngestCompute,
+        Change::Nothing,
+    ),
+    act(
+        crate::ingest::digitalocean_compute::SET,
+        "Register a DigitalOcean compute credential",
+        Cap(crate::ingest::NAME),
+        false,
+        Target::IngestCompute,
         Change::Nothing,
     ),
     act(
@@ -587,11 +595,11 @@ impl Action {
                     .ok_or("the target needs the approved record version")?;
                 json!({"instance": instance, "team_id": team, "version": version})
             }
-            Target::IngestConnection | Target::ScalewayCompute => {
+            Target::IngestConnection | Target::IngestCompute => {
                 let object = raw
                     .as_object()
                     .ok_or("expected a bucket connection target")?;
-                let compute = self.target == Target::ScalewayCompute;
+                let compute = self.target == Target::IngestCompute;
                 if compute {
                     only(
                         object,
@@ -618,7 +626,7 @@ impl Action {
                         value
                             .as_str()
                             .filter(|id| {
-                                if self.target == Target::ScalewayCompute {
+                                if self.target == Target::IngestCompute {
                                     crate::ingest::scaleway_compute::valid_generation(id)
                                 } else {
                                     crate::ingest::connections::valid_generation(id)
@@ -891,7 +899,7 @@ impl Action {
             Value::String(s) => s.clone(),
             v if matches!(
                 self.target,
-                Target::IngestConnection | Target::ScalewayCompute
+                Target::IngestConnection | Target::IngestCompute
             ) =>
             {
                 format!(

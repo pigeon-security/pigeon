@@ -12,6 +12,7 @@
 pub mod backblaze;
 pub mod connections;
 pub mod digitalocean;
+pub mod digitalocean_compute;
 pub mod hosts;
 mod managed_destination;
 pub mod net;
@@ -1732,10 +1733,14 @@ impl Capability for Ingest {
                                 let Some(name) = row["name"].as_str() else {
                                     continue;
                                 };
+                                let verify = args["compute_preview"].as_str() == Some(name);
                                 if scaleway_compute::project_scope(&record, name).is_ok() {
-                                    let verify = args["compute_preview"].as_str() == Some(name);
                                     row["compute"] =
                                         scaleway_compute::preview(cx, &record, name, verify)
+                                            .await?;
+                                } else if digitalocean_compute::team_scope(&record, name).is_ok() {
+                                    row["compute"] =
+                                        digitalocean_compute::preview(cx, &record, name, verify)
                                             .await?;
                                 }
                             }
@@ -1764,6 +1769,9 @@ impl Capability for Ingest {
             if w.action.id == scaleway_compute::SET {
                 return scaleway_compute::check_write(cx, w).await;
             }
+            if w.action.id == digitalocean_compute::SET {
+                return digitalocean_compute::check_write(cx, w).await;
+            }
             connections::check_write(cx, w).await
         })
     }
@@ -1776,6 +1784,9 @@ impl Capability for Ingest {
         Box::pin(async move {
             if w.action.id == scaleway_compute::SET {
                 return scaleway_compute::save(cx, w).await;
+            }
+            if w.action.id == digitalocean_compute::SET {
+                return digitalocean_compute::save(cx, w).await;
             }
             connections::save(cx, w).await
         })

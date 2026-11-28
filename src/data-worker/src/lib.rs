@@ -11,6 +11,7 @@
 //! `INGEST_JOB` (the Durable Object, ingest only). It consumes `{instance}-ingest-manifests` and
 //! `{instance}-data-backup`.
 
+mod digitalocean_compute;
 mod immutable_multipart;
 mod ingest_job;
 pub mod mail;
@@ -95,6 +96,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         }
         (Method::Post, mail_import::PATH) => mail_import::receive(&mut req, &env).await,
         (Method::Post, mail_import::TERMINAL_PATH) => mail_import::terminal(&mut req, &env).await,
+        (Method::Post, pigeon_cloud::digitalocean_compute::PATH) => {
+            digitalocean_compute::fetch(&mut req, &env).await
+        }
         (Method::Get, "/ingest/health") => json_answer(200, json!({ "ok": true })),
         (Method::Post, pigeon_ingest::scaleway::BROKER_PATH) => {
             scaleway_compute::fetch(&mut req, &env).await

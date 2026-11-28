@@ -515,6 +515,7 @@ pub async fn run(
                 ingest_runtime,
                 publisher,
                 scaleway_compute,
+                digitalocean_compute,
                 ..
             } => {
                 if *mail_import != crate::data_store::mail_import_enabled(instance)
@@ -546,6 +547,17 @@ pub async fn run(
                         "the approved Scaleway credentials changed; review a new Data Worker plan",
                     ));
                 }
+                let current_compute =
+                    crate::ingest::digitalocean_compute::registry(a.env, &instance.id).await?;
+                if digitalocean_compute.as_deref() != current_compute.as_ref()
+                    || digitalocean_compute
+                        .as_ref()
+                        .is_some_and(|registry| registry.account != a.account_id)
+                {
+                    return Err(bad(
+                        "the approved DigitalOcean credentials changed; review a new Data Worker plan",
+                    ));
+                }
                 upload(
                     a,
                     instance,
@@ -557,6 +569,7 @@ pub async fn run(
                         ingest_runtime: ingest_runtime.as_ref(),
                         publisher: publisher.as_ref(),
                         scaleway_compute: scaleway_compute.as_ref(),
+                        digitalocean_compute: digitalocean_compute.as_deref(),
                     },
                 )
                 .await?;
@@ -966,6 +979,7 @@ struct UploadOptions<'a> {
     ingest_runtime: Option<&'a pigeon_ingest::container_job::Runtime>,
     publisher: Option<&'a super::data_publisher::Publisher>,
     scaleway_compute: Option<&'a crate::ingest::scaleway_compute::Registry>,
+    digitalocean_compute: Option<&'a crate::ingest::digitalocean_compute::Registry>,
 }
 
 /// Uploads the data Worker from `built` (each module checked against its digest), with a new
@@ -983,6 +997,7 @@ async fn upload(
         ingest_runtime,
         publisher,
         scaleway_compute,
+        digitalocean_compute,
     } = options;
     let account = Account {
         id: a.account_id.to_string(),
@@ -1028,6 +1043,11 @@ async fn upload(
     }
     if let Some(compute) = scaleway_compute {
         crate::ingest::scaleway_compute::verify_registry(&account, &instance.id, compute).await?;
+        compute.bind(&mut metadata, &instance.id)?;
+    }
+    if let Some(compute) = digitalocean_compute {
+        crate::ingest::digitalocean_compute::verify_registry(&account, &instance.id, compute)
+            .await?;
         compute.bind(&mut metadata, &instance.id)?;
     }
     let (t, acc) = (a.token, a.account_id);

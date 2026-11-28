@@ -1607,6 +1607,76 @@ fn digitalocean_spaces_verifies_team_key_grant_and_bounded_listing() {
 }
 
 #[test]
+fn digitalocean_compute_generation_binding_is_scoped_and_canonical() {
+    use pigeon_cloud::digitalocean_compute::Pin;
+    let pin = Pin {
+        team: "approved-team".into(),
+        generation: "0123456789abcdef01234567".into(),
+    };
+    let slot = pin.binding("willowgraysen").unwrap();
+    assert_eq!(slot.len(), 60);
+    assert!(slot.starts_with("DO_COMPUTE_"));
+    assert!(slot.ends_with("_0123456789ABCDEF01234567"));
+    assert_ne!(Some(slot), pin.binding("sandbox"));
+    assert!(
+        Pin {
+            generation: "../0123456789abcdef01234".into(),
+            ..pin
+        }
+        .binding("willowgraysen")
+        .is_none()
+    );
+}
+
+#[test]
+fn digitalocean_owned_compute_registration_has_no_secret_payload() {
+    use pigeon_capabilities::console::write::{Step, action};
+    use pigeon_capabilities::ingest::digitalocean_compute::{Registered, Registry};
+    use pigeon_cloud::digitalocean_compute::Pin;
+
+    let old = Pin {
+        team: "approved-team".into(),
+        generation: "0123456789abcdef01234567".into(),
+    };
+    let newest = Pin {
+        team: old.team.clone(),
+        generation: "123456789abcdef012345678".into(),
+    };
+    let registry = Registry {
+        account: "owner".into(),
+        store: "store".into(),
+        pins: [old.clone(), newest.clone()]
+            .into_iter()
+            .map(|pin| Registered {
+                pin,
+                fingerprint: "metadata-fingerprint".into(),
+            })
+            .collect(),
+    };
+    assert_eq!(registry.active("approved-team"), Some(&newest));
+    assert!(registry.active("another-team").is_none());
+    let mut metadata = json!({"bindings":[]});
+    registry.bind(&mut metadata, "willowgraysen").unwrap();
+    assert_eq!(
+        metadata["bindings"][0]["secret_name"],
+        old.binding("willowgraysen").unwrap()
+    );
+    assert_eq!(
+        metadata["bindings"][1]["secret_name"],
+        newest.binding("willowgraysen").unwrap()
+    );
+    assert_eq!(metadata["bindings"][1]["store_id"], "store");
+
+    let action = action("data-ingest-digitalocean-compute-register").unwrap();
+    assert!(action.change(&json!({}), Step::Finish).is_ok());
+    assert!(
+        action
+            .change(&json!({"value": "owner-only"}), Step::Finish)
+            .is_err()
+    );
+}
+
+#[test]
 fn digitalocean_ingest_recovers_resources_and_waits_for_volume_detach() {
     use pigeon_cloud::digitalocean_ingest::{
         Created, Removal, Target, create_droplet, create_volume, find_droplet, find_volume,
