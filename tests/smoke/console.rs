@@ -3973,7 +3973,8 @@ mod email {
                 "0003_mail_import_lineage",
                 "0004_backup_progress",
                 "0005_ingest_grants",
-                "0006_immutable_multipart"
+                "0006_immutable_multipart",
+                "0007_ingest_index"
             ]
         );
     }

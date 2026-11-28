@@ -5,7 +5,8 @@ use pigeon_ingest::{decide::Head, managed_destination as wire};
 use serde_json::json;
 use std::collections::HashMap;
 use worker::{
-    Bucket, Conditional, Env, HttpMetadata, Request, Response, Result, wasm_bindgen::JsValue,
+    Bucket, Conditional, Env, HttpMetadata, Request, Response, Result, console_log,
+    wasm_bindgen::JsValue,
 };
 
 use crate::{json_answer, now_ms};
@@ -142,10 +143,11 @@ pub async fn fetch(req: &mut Request, env: &Env) -> Result<Response> {
             };
             Response::from_json(&head)
         }
-        // Up to 500 payload identities in one request, a hint for the runner's decisions. Each
-        // is an R2 HEAD (concurrently): the D1 `blobs` index is not used, because a dry run's
-        // repeated would-be uploads are indexed as duplicates of blobs R2 does not hold, and a
-        // duplicate must be certain (docs/plans/ingest-throughput.md).
+        // Up to 500 payload identities in one request, a hint for the runner's decisions. Once
+        // the index migration is applied, the D1 `index_blobs` rows answer first (a row is made
+        // only from a live run's proof that R2 holds the blob; dry runs index nothing), and
+        // only the misses are R2 HEADs (concurrently). Before it every key is an R2 HEAD
+        // (docs/plans/ingest-index-dry-run.md). Create-only uploads stay the final guard.
         "head-many" => {
             let Some(body) = bounded_body(req, wire::HEAD_MANY_BODY).await? else {
                 return error(413, "existence batch too large");
@@ -156,8 +158,10 @@ pub async fn fetch(req: &mut Request, env: &Env) -> Result<Response> {
             if !wire::head_many_keys(&grant.run, &batch) {
                 return error(403, "existence batch outside grant");
             }
-            let mut heads = Vec::with_capacity(batch.keys.len());
-            for chunk in batch.keys.chunks(50) {
+            let known = known(env, &batch.keys).await;
+            let misses = wire::index_misses(&batch.keys, &known);
+            let mut heads = Vec::with_capacity(misses.len());
+            for chunk in misses.chunks(50) {
                 let found =
                     futures_util::future::join_all(chunk.iter().map(|key| bucket.head(key))).await;
                 for object in found {
@@ -174,6 +178,9 @@ pub async fn fetch(req: &mut Request, env: &Env) -> Result<Response> {
                     });
                 }
             }
+            let Some(heads) = wire::merge_heads(&batch.keys, &known, heads) else {
+                return error(500, "existence batch lost its order");
+            };
             Response::from_json(&wire::HeadManyReply { heads })
         }
         "get" if key == pigeon_ingest::manifest::checkpoint_key(&grant.run) => {
@@ -281,12 +288,45 @@ pub async fn fetch(req: &mut Request, env: &Env) -> Result<Response> {
             if write.execute().await?.is_some()
                 || (immutable && existing_control(&bucket, &key, &body).await?)
             {
+                // A manifest part is indexed here, with the dry-run flag of the signed grant.
+                // A failure leaves index misses only (head-many then asks R2), never a false
+                // hit, so the write still succeeds.
+                if pigeon_ingest::protocol::is_manifest_part(&key) && crate::index_ready(env).await
+                {
+                    let text = String::from_utf8_lossy(&body);
+                    if let Err(e) = crate::index_part(env, &key, &text, grant.dry_run).await {
+                        console_log!("indexing {key} failed: {e}");
+                    }
+                }
                 return json_answer(200, json!({"stored": true}));
             }
             error(409, "immutable control object differs")
         }
         _ => error(403, "operation outside grant"),
     }
+}
+
+/// The index's identities of the blob keys among `keys`, once the index migration is applied;
+/// none before it, or when D1 fails (every key is then an R2 HEAD).
+async fn known(env: &Env, keys: &[String]) -> HashMap<String, Head> {
+    if !crate::index_ready(env).await {
+        return HashMap::new();
+    }
+    let shas: Vec<String> = keys
+        .iter()
+        .filter_map(|key| wire::indexable_sha(key).map(str::to_string))
+        .collect();
+    let mut rows = Vec::new();
+    for s in pigeon_ingest::index::known_blobs(&shas) {
+        match crate::store::rows(env, &s).await {
+            Ok(found) => rows.extend(found),
+            Err(e) => {
+                console_log!("head-many index lookup failed: {e}");
+                return HashMap::new();
+            }
+        }
+    }
+    wire::known_heads(&rows)
 }
 
 fn create_only() -> Conditional {

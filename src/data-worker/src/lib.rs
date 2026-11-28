@@ -189,9 +189,45 @@ pub fn parse_lines(text: &str) -> (Vec<ManifestLine>, usize) {
     (lines, bad)
 }
 
-/// Applies one manifest part to D1 as one batch.
+/// Whether the D1 holds the dedupe index: migration `0007_ingest_index` is applied
+/// (docs/plans/ingest-index-dry-run.md). Before it nothing is indexed and `head-many` asks R2.
+pub(crate) async fn index_ready(env: &Env) -> bool {
+    // No `migrations` table (an older or standalone database), or a failed read, is the same as
+    // not applied: nothing is indexed, and `head-many` asks R2 for every key.
+    store::rows(env, &pigeon_ingest::datastore::index_ready_query())
+        .await
+        .is_ok_and(|rows| !rows.is_empty())
+}
+
+/// Applies one manifest part to D1 as one batch, from the queue: the dry-run flag is read from
+/// the run's `job.json`, which core writes and the runner may not. A part whose job cannot be
+/// read is not applied (a dry run's lines must never be indexed as stored blobs).
 async fn apply(env: &Env, key: &str) -> Result<()> {
+    if !index_ready(env).await {
+        return Ok(());
+    }
     let bucket = env.bucket("DATA")?;
+    let run = key
+        .strip_prefix("ingest/runs/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("");
+    let job = match bucket
+        .get(pigeon_ingest::manifest::job_key(run))
+        .execute()
+        .await?
+    {
+        Some(object) => match object.body() {
+            Some(body) => {
+                serde_json::from_str::<pigeon_ingest::manifest::JobSpec>(&body.text().await?).ok()
+            }
+            None => None,
+        },
+        None => None,
+    };
+    let Some(job) = job.filter(|job| job.run == run) else {
+        console_log!("manifest part {key}: its job is unreadable, not indexed");
+        return Ok(());
+    };
     let Some(object) = bucket.get(key).execute().await? else {
         // Gone: nothing to apply, and a retry would not bring it back.
         console_log!("manifest part {key} is not in the bucket");
@@ -200,13 +236,19 @@ async fn apply(env: &Env, key: &str) -> Result<()> {
     let Some(body) = object.body() else {
         return Ok(());
     };
-    let (lines, bad) = parse_lines(&body.text().await?);
+    index_part(env, key, &body.text().await?, job.dry_run).await
+}
+
+/// Indexes manifest part `key` with body `text`; `dry_run` comes from the run's signed grant or
+/// its core-written job, never from the lines.
+pub(crate) async fn index_part(env: &Env, key: &str, text: &str, dry_run: bool) -> Result<()> {
+    let (lines, bad) = parse_lines(text);
     if bad > 0 {
         console_log!("manifest part {key}: {bad} bad lines skipped");
     }
     let db = env.d1("DB")?;
     let mut prepared: Vec<D1PreparedStatement> = Vec::new();
-    for s in index::apply_part(key, &lines, now_ms()) {
+    for s in index::apply_part(key, &lines, dry_run, now_ms()) {
         let params: Vec<JsValue> = s.params.iter().map(js).collect();
         prepared.push(db.prepare(&s.sql).bind(&params)?);
     }

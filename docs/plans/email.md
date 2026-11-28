@@ -68,7 +68,8 @@ holds only `text.txt` today; the D1 tables carry the decision-3 keys, so the rep
 named `sightings`. The lite tier does not create the dedupe index. When the full tier adds the
 ingest runner, its index moves to its own database `{instance}-index` (or its tables are
 prefixed `index_`), decided then; the lite migrations refuse to run on a database that holds the
-index's `blobs` table.
+index's `blobs` table. Decided 2026-11-28: prefixed `index_` tables in the lite store, migration
+`0007_ingest_index` ([ingest-index-dry-run.md](ingest-index-dry-run.md)).
 
 ## The flow
 

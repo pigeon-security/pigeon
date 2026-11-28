@@ -718,7 +718,12 @@ The certainty check needs only R2 (13.1). The index is the queryable record of s
 types and hints, and the base for later steps. It is D1 database `{instance}-data`
 (data-worker.md decision 6), applied from the manifests by the data Worker (R2 event
 notification on `ingest/runs/` → queue `{instance}-ingest-manifests` → consumer), so it can be
-rebuilt from R2 at any time. The schema (`pigeon_ingest::index::SCHEMA`):
+rebuilt from R2 at any time. **Since 2026-11-28** ([ingest-index-dry-run.md](ingest-index-dry-run.md))
+the tables live in the lite store with the prefix `index_` (migration `0007_ingest_index`), a
+dry run's part indexes nothing but its `index_applied` mark, a managed run's parts are indexed
+by the data Worker as the runner writes them (the dry-run flag from the signed grant), and
+`head-many` answers from `index_blobs` first. The schema (`pigeon_ingest::index::SCHEMA`, shown
+here unprefixed):
 
 ```sql
 CREATE TABLE blobs (            -- one row per unique content

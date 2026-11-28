@@ -2092,32 +2092,38 @@ fn ingest_index_applies_manifest_parts_and_verifies_starts() {
     for i in 0..60 {
         lines.push(line(&format!("m{i}"), "sha1", "duplicate", false));
     }
-    let statements = apply_part(&part, &lines, 99);
-    assert!(statements[0].sql.starts_with("INSERT INTO applied"));
+    let statements = apply_part(&part, &lines, false, 99);
+    assert!(statements[0].sql.starts_with("INSERT INTO index_applied"));
     for s in &statements {
         assert!(s.sql.ends_with("ON CONFLICT DO NOTHING"), "{}", s.sql);
         assert!(s.params.len() <= MAX_PARAMS);
     }
     let sighting_batches = statements
         .iter()
-        .filter(|s| s.sql.contains("INTO sightings"));
+        .filter(|s| s.sql.contains("INTO index_sightings"));
     assert!(sighting_batches.count() > 1);
     for s in &statements {
         run(&db, s);
     }
     let counts = |db: &rusqlite::Connection| {
-        ["applied", "blobs", "sightings", "hints"].map(|t| count(db, t))
+        [
+            "index_applied",
+            "index_blobs",
+            "index_sightings",
+            "index_hints",
+        ]
+        .map(|t| count(db, t))
     };
     // 64 distinct sighting ids, blobs sha1 and sha2 only, one hint per hash with a blob or not.
     assert_eq!(counts(&db), [1, 2, 64, 3]);
     // Applying the same part again changes nothing.
-    for s in apply_part(&part, &lines, 100) {
+    for s in apply_part(&part, &lines, false, 100) {
         run(&db, &s);
     }
     assert_eq!(counts(&db), [1, 2, 64, 3]);
     let (decision, flags, run_id): (String, String, String) = db
         .query_row(
-            "SELECT decision, flags, run FROM sightings WHERE id = 's2'",
+            "SELECT decision, flags, run FROM index_sightings WHERE id = 's2'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -2147,9 +2153,9 @@ fn ingest_index_applies_manifest_parts_and_verifies_starts() {
     status.state = pigeon_ingest::manifest::RunState::Done;
     status.updated_ms = 3;
     run(&db, &apply_run(&job, &status, "cloudflare"));
-    assert_eq!(count(&db, "runs"), 1);
+    assert_eq!(count(&db, "index_runs"), 1);
     let (state, updated): (String, i64) = db
-        .query_row("SELECT state, updated_ms FROM runs", [], |r| {
+        .query_row("SELECT state, updated_ms FROM index_runs", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .unwrap();

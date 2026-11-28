@@ -4,6 +4,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::decide::Head;
 use crate::{blob_key, container_job::valid_run, manifest};
 
 pub const PATH: &str = "/ingest/destination";
@@ -94,7 +95,66 @@ pub struct HeadMany {
 /// A `head-many` reply: for each key in order, the blob's identity or none. A hint only.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HeadManyReply {
-    pub heads: Vec<Option<crate::decide::Head>>,
+    pub heads: Vec<Option<Head>>,
+}
+
+/// The SHA-256 a `head-many` key may be answered for from the D1 index: a blob key's own hash.
+/// A quarantine key never is (the index says nothing about `quarantine/`).
+pub fn indexable_sha(key: &str) -> Option<&str> {
+    let sha = key.rsplit('/').next()?;
+    (digest(sha) && key == blob_key(sha)).then_some(sha)
+}
+
+/// The identities the index rows `rows` (`sha256, size, blake3`, from
+/// [`crate::index::known_blobs`]) give, by SHA-256: what R2's HEAD of the blob answers, since a
+/// row is made only from a live run's proof and the blob's metadata carries the same hashes.
+pub fn known_heads(rows: &[serde_json::Value]) -> std::collections::HashMap<String, Head> {
+    rows.iter()
+        .filter_map(|row| {
+            let sha = row["sha256"].as_str()?;
+            let size = row["size"]
+                .as_u64()
+                .or_else(|| row["size"].as_f64().map(|f| f as u64))?;
+            let blake3 = row["blake3"].as_str().filter(|b| !b.is_empty());
+            Some((
+                sha.to_string(),
+                Head {
+                    size,
+                    sha256: Some(sha.to_string()),
+                    blake3: blake3.map(str::to_string),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The keys of `keys` the index does not know (in order): the ones R2 must still HEAD.
+pub fn index_misses(
+    keys: &[String],
+    known: &std::collections::HashMap<String, Head>,
+) -> Vec<String> {
+    keys.iter()
+        .filter(|key| !indexable_sha(key).is_some_and(|sha| known.contains_key(sha)))
+        .cloned()
+        .collect()
+}
+
+/// The `head-many` answers, in `keys` order: the index's for the keys it knows, R2's (`misses`,
+/// the HEADs of [`index_misses`] in order) for the rest. None when `misses` is the wrong length.
+pub fn merge_heads(
+    keys: &[String],
+    known: &std::collections::HashMap<String, Head>,
+    misses: Vec<Option<Head>>,
+) -> Option<Vec<Option<Head>>> {
+    let mut misses = misses.into_iter();
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        match indexable_sha(key).and_then(|sha| known.get(sha)) {
+            Some(head) => out.push(Some(head.clone())),
+            None => out.push(misses.next()?),
+        }
+    }
+    misses.next().is_none().then_some(out)
 }
 
 /// Whether a `head-many` request is within a run's grant: 1 to [`HEAD_MANY`] distinct payload

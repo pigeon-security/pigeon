@@ -62,7 +62,7 @@ async fn batch(env: &Env, statements: Vec<Statement>) -> Result<()> {
 }
 
 /// The rows of one query.
-async fn rows(env: &Env, s: &Statement) -> Result<Vec<Value>> {
+pub(crate) async fn rows(env: &Env, s: &Statement) -> Result<Vec<Value>> {
     let params: Vec<JsValue> = s.params.iter().map(js).collect();
     let result = env.d1(DB)?.prepare(&s.sql).bind(&params)?.all().await?;
     result.results::<Value>()

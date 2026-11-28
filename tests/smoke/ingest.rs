@@ -866,3 +866,390 @@ fn ingest_spent_grant_stops_cleanly_for_a_continuation() {
         assert_eq!(n, 407, "no object lost");
     }
 }
+
+// ---- the D1 index (docs/plans/ingest-index-dry-run.md) ----
+
+/// The lite store's D1 with the index migration applied, in memory.
+fn index_db() -> rusqlite::Connection {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let m = pigeon_ingest::datastore::MIGRATIONS
+        .iter()
+        .find(|m| m.id == pigeon_ingest::datastore::INDEX_MIGRATION)
+        .unwrap();
+    db.execute(pigeon_ingest::datastore::MIGRATIONS_TABLE, [])
+        .unwrap();
+    for s in pigeon_ingest::datastore::migration_statements(m, "now") {
+        sql_run(&db, &s);
+    }
+    db
+}
+
+fn sql_params(s: &pigeon_ingest::index::Statement) -> Vec<rusqlite::types::Value> {
+    use serde_json::Value;
+    s.params
+        .iter()
+        .map(|v| match v {
+            Value::Null => rusqlite::types::Value::Null,
+            Value::Number(n) if n.is_i64() => rusqlite::types::Value::Integer(n.as_i64().unwrap()),
+            Value::Number(n) => rusqlite::types::Value::Real(n.as_f64().unwrap()),
+            Value::String(t) => rusqlite::types::Value::Text(t.clone()),
+            other => rusqlite::types::Value::Text(other.to_string()),
+        })
+        .collect()
+}
+
+fn sql_run(db: &rusqlite::Connection, s: &pigeon_ingest::index::Statement) {
+    assert!(
+        s.params.len() <= pigeon_ingest::index::MAX_PARAMS,
+        "{}",
+        s.sql
+    );
+    db.execute(&s.sql, rusqlite::params_from_iter(sql_params(s)))
+        .unwrap_or_else(|e| panic!("{e}: {}", s.sql));
+}
+
+/// The rows of a query as JSON objects, as D1 answers them.
+fn sql_rows(
+    db: &rusqlite::Connection,
+    s: &pigeon_ingest::index::Statement,
+) -> Vec<serde_json::Value> {
+    use rusqlite::types::ValueRef;
+    let mut q = db.prepare(&s.sql).unwrap();
+    let names: Vec<String> = q.column_names().iter().map(|n| n.to_string()).collect();
+    q.query_map(rusqlite::params_from_iter(sql_params(s)), |r| {
+        let mut row = serde_json::Map::new();
+        for (i, n) in names.iter().enumerate() {
+            let v = match r.get_ref(i)? {
+                ValueRef::Null => serde_json::Value::Null,
+                ValueRef::Integer(n) => serde_json::json!(n),
+                ValueRef::Real(f) => serde_json::json!(f),
+                ValueRef::Text(t) => serde_json::json!(String::from_utf8_lossy(t)),
+                ValueRef::Blob(_) => serde_json::Value::Null,
+            };
+            row.insert(n.clone(), v);
+        }
+        Ok(serde_json::Value::Object(row))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+fn sql_count(db: &rusqlite::Connection, sql: &str) -> i64 {
+    db.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+/// Applies every manifest part of `run_id` in `dest` to `db`, as the data Worker does, with
+/// `dry_run` from the grant; `legacy` rewrites the statements for the old unprefixed tables.
+fn index_run(db: &rusqlite::Connection, dest: &MemDest, run_id: &str, dry_run: bool, legacy: bool) {
+    for key in dest.part_keys(run_id) {
+        let text = String::from_utf8(dest.get(&key).unwrap()).unwrap();
+        let lines: Vec<ManifestLine> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        for mut s in pigeon_ingest::index::apply_part(&key, &lines, dry_run, 5) {
+            if legacy {
+                s.sql = s.sql.replace("index_", "");
+            }
+            sql_run(db, &s);
+        }
+    }
+}
+
+/// A dry run indexes nothing as stored (nor its sightings); a live run indexes exactly the blobs
+/// R2 holds, and a sighting for every source object, duplicates included, each pointing at a
+/// blob the index holds.
+#[test]
+fn ingest_index_holds_only_blobs_r2_stores() {
+    let db = index_db();
+    let (source, dry_dest) = planted(300);
+    go(&job("dry", true, 8), &source, &dry_dest);
+    assert!(
+        dry_dest
+            .lines("dry")
+            .iter()
+            .any(|l| l.verdict == Verdict::Duplicate && l.reason == Reason::SeenInRun)
+    );
+    index_run(&db, &dry_dest, "dry", true, false);
+    assert_eq!(sql_count(&db, "SELECT count(*) FROM index_blobs"), 0);
+    assert_eq!(sql_count(&db, "SELECT count(*) FROM index_sightings"), 0);
+    assert_eq!(
+        sql_count(&db, "SELECT count(*) FROM index_applied"),
+        dry_dest.part_keys("dry").len() as i64
+    );
+
+    let (source, live_dest) = planted(300);
+    go(&job("live", false, 8), &source, &live_dest);
+    // Twice: applying is idempotent; and the dry run again after it changes nothing.
+    for _ in 0..2 {
+        index_run(&db, &live_dest, "live", false, false);
+        index_run(&db, &dry_dest, "dry", true, false);
+    }
+    let lines = live_dest.lines("live");
+    assert_eq!(
+        sql_count(&db, "SELECT count(*) FROM index_sightings"),
+        lines.len() as i64
+    );
+    assert_eq!(
+        sql_count(
+            &db,
+            "SELECT count(*) FROM index_sightings WHERE run <> 'live'"
+        ),
+        0
+    );
+    let blobs = sql_rows(
+        &db,
+        &pigeon_ingest::index::Statement {
+            sql: "SELECT sha256, r2_key, size FROM index_blobs".into(),
+            params: Vec::new(),
+        },
+    );
+    let mut want: Vec<String> = lines
+        .iter()
+        .filter(|l| pigeon_ingest::index::proves_stored(l))
+        .map(|l| l.sha256.clone())
+        .collect();
+    want.sort();
+    want.dedup();
+    assert_eq!(blobs.len(), want.len());
+    for row in &blobs {
+        let sha = row["sha256"].as_str().unwrap();
+        let head = live_dest
+            .head(row["r2_key"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.sha256.as_deref(), Some(sha));
+        assert_eq!(Some(head.size), row["size"].as_u64());
+    }
+    // Every duplicate's sighting points at an indexed blob; a conflict's blob is not indexed.
+    assert_eq!(
+        sql_count(
+            &db,
+            "SELECT count(*) FROM index_sightings s WHERE s.decision = 'duplicate' AND NOT EXISTS \
+             (SELECT 1 FROM index_blobs b WHERE b.sha256 = s.sha256)"
+        ),
+        0
+    );
+    assert!(
+        sql_count(
+            &db,
+            "SELECT count(*) FROM index_sightings WHERE decision = 'duplicate'"
+        ) > 0
+    );
+    let conflict = metrics(b"conflicting\n").sha256;
+    assert_eq!(
+        sql_count(
+            &db,
+            &format!("SELECT count(*) FROM index_blobs WHERE sha256 = '{conflict}'")
+        ),
+        0
+    );
+    // The flaky blob: its first sighting failed, the next stored it, so it is indexed.
+    let flaky = metrics(b"flaky blob\n").sha256;
+    assert_eq!(
+        sql_count(
+            &db,
+            &format!("SELECT count(*) FROM index_blobs WHERE sha256 = '{flaky}'")
+        ),
+        1
+    );
+}
+
+/// The repair of an index the old code made (it applied dry runs as live): on the lite tables
+/// and the old unprefixed ones, the dry runs' rows go, a blob a later live run stored is
+/// re-marked with that run, a blob R2 holds is kept, and only rows R2 has no object for are
+/// deleted. Running it again changes nothing.
+#[test]
+fn ingest_index_cleanup_removes_dry_run_rows_and_keeps_real_ones() {
+    use pigeon_ingest::index::{Statement, Tables, cleanup, cleanup_candidates};
+    for legacy in [false, true] {
+        let (t, db) = if legacy {
+            let db = rusqlite::Connection::open_in_memory().unwrap();
+            for s in pigeon_ingest::index::schema_statements() {
+                db.execute(&s.sql.replace("index_", ""), []).unwrap();
+            }
+            (Tables::LEGACY, db)
+        } else {
+            (Tables::LITE, index_db())
+        };
+        let (source, dest) = planted(300);
+        go(&job("dry1", true, 8), &source, &dest);
+        // The old behaviour: a dry run's part applied as if live.
+        index_run(&db, &dest, "dry1", false, legacy);
+        let blobs_of = |db: &rusqlite::Connection| -> Vec<(String, String)> {
+            let mut out: Vec<(String, String)> = sql_rows(
+                db,
+                &Statement {
+                    sql: format!("SELECT sha256, first_run FROM {}", t.blobs),
+                    params: Vec::new(),
+                },
+            )
+            .iter()
+            .map(|r| {
+                (
+                    r["sha256"].as_str().unwrap().to_string(),
+                    r["first_run"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+            out.sort();
+            out
+        };
+        // pair 1: a later live run stores it; pair 2: R2 got it otherwise (unindexed);
+        // pair 3: never stored. All three were dry-run "duplicates" (seen in run).
+        let (pair1, pair2, pair3) = (
+            metrics(b"pair 1\n"),
+            metrics(b"pair 2\n"),
+            metrics(b"pair 3\n"),
+        );
+        let bad = blobs_of(&db);
+        for m in [&pair1, &pair2, &pair3] {
+            assert!(bad.contains(&(m.sha256.clone(), "dry1".into())));
+        }
+        let live = MemSource {
+            objs: BTreeMap::from([("l/a".to_string(), b"pair 1\n".to_vec())]),
+            page: 10,
+            jitter_us: 0,
+        };
+        go(&job("live1", false, 2), &live, &dest);
+        index_run(&db, &dest, "live1", false, legacy);
+        dest.objs.lock().unwrap().insert(
+            blob_key(&pair2.sha256),
+            (
+                b"pair 2\n".to_vec(),
+                Some(pair2.sha256.clone()),
+                Some(pair2.blake3.clone()),
+            ),
+        );
+
+        let mut first = Vec::new();
+        for round in 0..2 {
+            let absent: Vec<String> = sql_rows(&db, &cleanup_candidates(&t))
+                .iter()
+                .filter(|r| dest.head(r["r2_key"].as_str().unwrap()).unwrap().is_none())
+                .map(|r| r["sha256"].as_str().unwrap().to_string())
+                .collect();
+            for s in cleanup(&t, &["dry1".to_string()], &absent) {
+                sql_run(&db, &s);
+            }
+            if round == 0 {
+                first = blobs_of(&db);
+            }
+        }
+        let after = blobs_of(&db);
+        assert_eq!(first, after, "idempotent");
+        assert!(
+            after.contains(&(pair1.sha256.clone(), "live1".into())),
+            "legacy {legacy}"
+        );
+        assert!(after.iter().any(|(sha, _)| sha == &pair2.sha256));
+        assert!(!after.iter().any(|(sha, _)| sha == &pair3.sha256));
+        // What is left is in R2; no row whose blob R2 holds was deleted.
+        for (sha, _) in &after {
+            assert!(dest.head(&blob_key(sha)).unwrap().is_some());
+        }
+        for (sha, _) in &bad {
+            if dest.head(&blob_key(sha)).unwrap().is_some() {
+                assert!(after.iter().any(|(s, _)| s == sha));
+            }
+        }
+        assert_eq!(
+            sql_count(
+                &db,
+                &format!("SELECT count(*) FROM {} WHERE run = 'dry1'", t.sightings)
+            ),
+            0
+        );
+        assert_eq!(
+            sql_count(
+                &db,
+                &format!("SELECT count(*) FROM {} WHERE run = 'dry1'", t.hints)
+            ),
+            0
+        );
+        assert!(sql_count(&db, &format!("SELECT count(*) FROM {}", t.sightings)) > 0);
+    }
+}
+
+/// `head-many` from D1 first, R2 for the misses, answers exactly what R2 alone answers, for
+/// blobs a live run stored, blobs only a dry run saw, a blob R2 holds unindexed, an absent one
+/// and a quarantine key; and before the migration (no index) it is R2 alone.
+#[test]
+fn ingest_head_many_from_the_index_matches_r2() {
+    use pigeon_ingest::managed_destination::{
+        index_misses, indexable_sha, known_heads, merge_heads,
+    };
+    let db = index_db();
+    let (source, dest) = planted(300);
+    go(&job("live", false, 8), &source, &dest);
+    index_run(&db, &dest, "live", false, false);
+    let (dry_source, _) = planted(50);
+    let mut dry_objs = dry_source.objs.clone();
+    dry_objs.insert("d/new.txt".into(), b"seen only by a dry run\n".to_vec());
+    dry_objs.insert(
+        "d/new-again.txt".into(),
+        b"seen only by a dry run\n".to_vec(),
+    );
+    let dry_source = MemSource {
+        objs: dry_objs,
+        page: 97,
+        jitter_us: 0,
+    };
+    go(&job("dry", true, 4), &dry_source, &dest);
+    index_run(&db, &dest, "dry", true, false);
+    let unindexed = metrics(b"stored by another writer\n");
+    dest.objs.lock().unwrap().insert(
+        blob_key(&unindexed.sha256),
+        (
+            b"stored by another writer\n".to_vec(),
+            Some(unindexed.sha256.clone()),
+            Some(unindexed.blake3.clone()),
+        ),
+    );
+
+    let mut keys: Vec<String> = dest
+        .lines("live")
+        .iter()
+        .chain(dest.lines("dry").iter())
+        .filter(|l| !l.sha256.is_empty())
+        .map(|l| blob_key(&l.sha256))
+        .collect();
+    keys.push(blob_key(&unindexed.sha256));
+    keys.push(blob_key(&"ab".repeat(32)));
+    let conflict = metrics(b"conflicting\n").sha256;
+    keys.push(pigeon_ingest::manifest::quarantine_key("live", &conflict));
+    let mut seen = std::collections::HashSet::new();
+    keys.retain(|k| seen.insert(k.clone()));
+
+    let r2_only: Vec<Option<Head>> = keys.iter().map(|k| dest.head(k).unwrap()).collect();
+    for indexed in [true, false] {
+        let known = if indexed {
+            let shas: Vec<String> = keys
+                .iter()
+                .filter_map(|k| indexable_sha(k).map(str::to_string))
+                .collect();
+            let rows: Vec<serde_json::Value> = pigeon_ingest::index::known_blobs(&shas)
+                .iter()
+                .flat_map(|s| sql_rows(&db, s))
+                .collect();
+            known_heads(&rows)
+        } else {
+            HashMap::new()
+        };
+        let misses = index_misses(&keys, &known);
+        if indexed {
+            assert!(misses.len() * 2 < keys.len(), "D1 answered most");
+        } else {
+            assert_eq!(misses.len(), keys.len());
+        }
+        let heads = misses.iter().map(|k| dest.head(k).unwrap()).collect();
+        assert_eq!(merge_heads(&keys, &known, heads), Some(r2_only.clone()));
+    }
+    // The dry run's own blob is absent in both.
+    let dry_only = blob_key(&metrics(b"seen only by a dry run\n").sha256);
+    let at = keys.iter().position(|k| *k == dry_only).unwrap();
+    assert_eq!(r2_only[at], None);
+    // A wrong-length miss list is refused.
+    assert_eq!(merge_heads(&keys, &HashMap::new(), Vec::new()), None);
+}

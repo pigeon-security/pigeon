@@ -258,7 +258,24 @@ CREATE INDEX IF NOT EXISTS deliveries_outcome ON email_deliveries (outcome, at)"
         id: "0006_immutable_multipart",
         sql: "CREATE TABLE IF NOT EXISTS ingest_multipart (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
     },
+    Migration {
+        id: INDEX_MIGRATION,
+        sql: crate::index::SCHEMA,
+    },
 ];
+
+/// The migration that makes ingest.md 13.4's dedupe index in the lite store, its tables prefixed
+/// `index_` (docs/plans/ingest-index-dry-run.md). The data Worker indexes manifest parts, and
+/// `head-many` answers from `index_blobs` first, only once it is applied.
+pub const INDEX_MIGRATION: &str = "0007_ingest_index";
+
+/// The query that says whether [`INDEX_MIGRATION`] is applied: one row, or none.
+pub fn index_ready_query() -> Statement {
+    Statement {
+        sql: "SELECT id FROM migrations WHERE id = ?".into(),
+        params: vec![json!(INDEX_MIGRATION)],
+    }
+}
 
 /// The statements of one migration, then the row that records it.
 pub fn migration_statements(m: &Migration, at: &str) -> Vec<Statement> {

@@ -77,7 +77,8 @@ B2 `ca-east-006`, prefix `txt/`, about 471,000 files of about 640 bytes each) ra
   dry run a repeated would-be upload is a `duplicate` (seen in run) of a blob R2 never received,
   so a D1 hit could leave a file behind that R2 does not hold (decision 13.1 forbids it). R2 HEADs
   inside the Worker keep the batching benefit. Follow-up: index only blobs a live run stored,
-  then D1 can answer first.
+  then D1 can answer first. Done in [ingest-index-dry-run.md](ingest-index-dry-run.md): D1 answers
+  first once an instance has migration `0007_ingest_index`.
 - **Create-only uploads.** Every blob PUT is create-only (`If-None-Match: *` on R2's S3 API; the
   managed destination already was). An upload refused because the blob already exists with the
   same identity is recorded as a **duplicate** (`in_r2`), never an error. The D1 index stays keyed
@@ -130,4 +131,4 @@ B2 `ca-east-006`, prefix `txt/`, about 471,000 files of about 640 bytes each) ra
 | --- | --- | --- |
 | a | Estimate from file count, `objects`, measured rate, deadline, runner self-stop, continue, Scaleway `size_bytes` fix | landed |
 | b | Parallel engine, `head_many` (+ Data Worker op), create-only uploads, prefetch, memory spool, connection reuse | landed |
-| c | Shared live guard, grant from declared totals, >16 MiB multipart or skip-and-report, live cap, spent grant stops for a continuation | landing |
+| c | Shared live guard, grant from declared totals, >16 MiB multipart or skip-and-report, live cap, spent grant stops for a continuation | landed (BjS0aK6AtNkKP7Bv) |
