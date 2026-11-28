@@ -249,8 +249,10 @@ fn go(job: &JobSpec, source: &dyn Source, dest: &MemDest) -> Report {
     go_until(job, source, dest, &AtomicBool::new(false))
 }
 
+/// The run's report without its stage timings, which differ between engines (the timing test
+/// reads them).
 fn go_until(job: &JobSpec, source: &dyn Source, dest: &MemDest, stop: &AtomicBool) -> Report {
-    run(&Run {
+    let mut report = run(&Run {
         job,
         source,
         dest,
@@ -258,7 +260,10 @@ fn go_until(job: &JobSpec, source: &dyn Source, dest: &MemDest, stop: &AtomicBoo
         clock: &Fixed,
         stop,
     })
-    .unwrap()
+    .unwrap();
+    assert!(report.timings.is_some(), "every report has its timings");
+    report.timings = None;
+    report
 }
 
 fn metrics(b: &[u8]) -> Metrics {
@@ -1252,4 +1257,264 @@ fn ingest_head_many_from_the_index_matches_r2() {
     assert_eq!(r2_only[at], None);
     // A wrong-length miss list is refused.
     assert_eq!(merge_heads(&keys, &HashMap::new(), Vec::new()), None);
+}
+
+// ---- docs/plans/ingest-bytes.md: stage timings, memory staging, sharded runs ----
+
+/// A monotonic clock that moves 100 µs each time it is read; the wall clock stays fixed, so
+/// manifests are the same as under [`Fixed`].
+#[derive(Default)]
+struct Ticking(AtomicU64);
+impl Clock for Ticking {
+    fn now_ms(&self) -> i64 {
+        1000
+    }
+    fn now_us(&self) -> u64 {
+        self.0.fetch_add(100, Ordering::SeqCst)
+    }
+}
+
+/// A spool in memory with a chosen memory limit and budget and free space.
+struct SizedSpool {
+    limit: u64,
+    budget: u64,
+    free: u64,
+}
+impl Spool for SizedSpool {
+    fn create(&self) -> Result<Box<dyn SpoolFile>, Error> {
+        Ok(Box::new(Cursor::new(Vec::new())))
+    }
+    fn free_bytes(&self) -> u64 {
+        self.free
+    }
+    fn memory_limit(&self) -> u64 {
+        self.limit
+    }
+    fn memory_budget(&self) -> u64 {
+        self.budget
+    }
+}
+
+fn go_with(job: &JobSpec, source: &dyn Source, dest: &MemDest, spool: &dyn Spool) -> Report {
+    run(&Run {
+        job,
+        source,
+        dest,
+        spool,
+        clock: &Ticking::default(),
+        stop: &AtomicBool::new(false),
+    })
+    .unwrap()
+}
+
+/// Every stage is counted: each object read is opened, read and hashed once with its bytes,
+/// each upload is timed with the bytes it sent, existence checks, listing pages and control
+/// writes are counted, and `status.json` carries the same timings as the report.
+#[test]
+fn ingest_stage_timings_are_counted() {
+    for threads in [1, 64] {
+        let (source, dest) = planted(1_200);
+        let spool = SizedSpool {
+            limit: 8,
+            budget: u64::MAX,
+            free: 1 << 30,
+        };
+        let report = go_with(&job("timed", false, threads), &source, &dest, &spool);
+        let t = report.timings.clone().expect("timings");
+        let c = &report.counters;
+        assert_eq!(t.threads, threads);
+        assert!(t.elapsed_ms > 0, "{t:?}");
+        // Every listed object was read: none is too large here.
+        assert_eq!(t.source_open.count, c.listed, "threads {threads}");
+        assert_eq!(t.source_read.count, c.listed);
+        assert_eq!(t.source_read.bytes, c.bytes_read);
+        assert_eq!(t.hash.bytes, c.bytes_read);
+        assert!(t.hash.count >= c.listed);
+        // Files over the 8-byte memory limit went to the spool, the rest stayed in memory.
+        assert!(t.spool_write.count > 0 && t.spool_write.count < c.listed);
+        // Uploads: one per stored blob plus the retried failures, with the bytes sent.
+        let puts = dest.blob_puts.load(Ordering::SeqCst);
+        assert!(t.upload.count >= puts);
+        assert!(t.upload.bytes >= c.uploaded_bytes);
+        assert!(t.lookup.count > 0);
+        assert_eq!(t.list.count, (c.listed as usize).div_ceil(97) as u64);
+        assert!(t.control.count >= 3 && t.control.bytes > 0);
+        for stage in [&t.source_open, &t.source_read, &t.hash, &t.upload, &t.list] {
+            assert!(stage.ms > 0 || stage.count == 0, "{t:?}");
+        }
+        assert!(t.source_open.p50_ms.is_some() && t.upload.p95_ms.is_some());
+        assert!(!t.bottleneck.is_empty());
+        assert!(t.worker_busy_share > 0.0);
+        let status: pigeon_ingest::manifest::Status = serde_json::from_slice(
+            &dest
+                .get(&pigeon_ingest::manifest::status_key("timed"))
+                .unwrap(),
+        )
+        .unwrap();
+        let st = status.timings.expect("status timings");
+        assert_eq!(st.source_open.count, t.source_open.count);
+        // Serialised, the timings round-trip; an older report without them still reads.
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json["timings"]["upload"]["ms"].is_u64());
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("timings");
+        let back: Report = serde_json::from_value(old).unwrap();
+        assert!(back.timings.is_none());
+    }
+}
+
+/// The bytes stored are the same whichever holds a file between reading and writing: memory
+/// (up to the limit, within the budget), a spool file, or neither (hashed while streaming and
+/// read again to copy). Manifests, counters and blobs are identical on both engines.
+#[test]
+fn ingest_memory_staging_stores_what_the_spool_path_stores() {
+    let mut objs = BTreeMap::new();
+    for i in 0..300u32 {
+        let size = [5usize, 900, 70_000, 1_200_000][(i % 4) as usize];
+        let body: Vec<u8> = (0..size)
+            .map(|j| (j as u32).wrapping_mul(31).wrapping_add(i % 37) as u8)
+            .collect();
+        objs.insert(format!("m/{i:04}"), body);
+    }
+    let source = MemSource {
+        objs,
+        page: 50,
+        jitter_us: 30,
+    };
+    let spools = [
+        // Everything through spool files.
+        SizedSpool {
+            limit: 0,
+            budget: u64::MAX,
+            free: 1 << 30,
+        },
+        // Everything up to 16 MiB in memory.
+        SizedSpool {
+            limit: 16 << 20,
+            budget: u64::MAX,
+            free: 1 << 30,
+        },
+        // In memory until a small budget is held, then spool files.
+        SizedSpool {
+            limit: 16 << 20,
+            budget: 1_000_000,
+            free: 1 << 30,
+        },
+        // No room at all: hashed while streaming, read again and verified to copy.
+        SizedSpool {
+            limit: 0,
+            budget: 0,
+            free: 0,
+        },
+    ];
+    let mut outcomes = Vec::new();
+    for (i, spool) in spools.iter().enumerate() {
+        for threads in [1, 16] {
+            let dest = MemDest::default();
+            let mut report = go_with(&job("mem", false, threads), &source, &dest, spool);
+            let t = report.timings.take().unwrap();
+            match i {
+                0 => assert_eq!(t.spool_write.count, report.counters.listed),
+                1 => assert_eq!(t.spool_write.count, 0),
+                2 => assert!(t.spool_write.count > 0 && t.spool_write.count < 300),
+                _ => assert_eq!(t.spool_write.count, 0),
+            }
+            let mut lines = dest.lines("mem");
+            if i == 3 {
+                // The only difference: those lines say the file was too big to spool.
+                for l in &mut lines {
+                    l.flags
+                        .retain(|f| *f != pigeon_ingest::archive::Flag::OverSpool);
+                }
+                report.flags.clear();
+            }
+            outcomes.push((report, lines, stored(&dest, "blobs/")));
+        }
+    }
+    for o in &outcomes[1..] {
+        assert_eq!(o.0.counters, outcomes[0].0.counters);
+        assert_eq!(o.1, outcomes[0].1);
+        assert_eq!(o.2, outcomes[0].2);
+    }
+    // Bodies repeat every 148 objects: the rest are duplicates.
+    assert_eq!(outcomes[0].2.len(), 148);
+}
+
+/// A measured run of large objects sets the byte rate, so a byte-heavy bucket is no longer
+/// estimated at the default; before any measurement Cloudflare assumes 20-50 MB/s.
+#[test]
+fn ingest_estimate_uses_a_measured_byte_rate() {
+    use pigeon_ingest::estimate::{Host, Measured, Throughput, estimate_run};
+    // The willowgraysen bucket: 211.4 GB in 145,991 files.
+    let (bytes, files) = (211_400_000_000u64, 145_991u64);
+    let live = Throughput {
+        measured: Some(Measured {
+            run: "20261128-b2-53426b6b6f3575734248697746656444".into(),
+            files_per_s: 21.0,
+            bytes_per_s: 6.6e6,
+        }),
+        ..Throughput::new(Host::Cloudflare, 64)
+    };
+    let e = estimate_run(Host::Cloudflare, bytes, files, 0.3, &live);
+    assert_eq!(e.bound, "bytes");
+    // 211.4 GB at 6.6 MB/s is about 8.9 hours.
+    assert!(e.hours_high > 8.8 && e.hours_high < 9.0, "{e:?}");
+    assert!(
+        e.assumptions[0].contains("(measured)"),
+        "{:?}",
+        e.assumptions
+    );
+    // A measured run of tiny files says nothing about bytes: the default byte rate stays.
+    let small = Throughput {
+        measured: Some(Measured {
+            run: "small".into(),
+            files_per_s: 36.0,
+            bytes_per_s: 1.4e6,
+        }),
+        ..Throughput::new(Host::Cloudflare, 64)
+    };
+    let s = estimate_run(Host::Cloudflare, bytes, files, 0.3, &small);
+    assert!(!s.assumptions[0].contains("(measured)"));
+    // 211.4 GB at 20 MB/s is about 2.9 hours, over the files' 1.1 hours.
+    assert_eq!(s.bound, "bytes");
+    assert!(s.hours_high > 2.9 && s.hours_high < 3.0, "{s:?}");
+}
+
+/// `get_many` batches are bounded so the request stays under the Data Worker's request limit,
+/// and an older Data Worker's reading of the operation fails (it answers 400), never succeeds.
+#[test]
+fn ingest_source_signs_downloads_in_bounded_batches() {
+    use pigeon_ingest::source_credentials::{
+        GET_MANY, GET_MANY_KEY_BYTES, REQUEST_MAX, Read as SourceRead, valid_batch,
+    };
+    let keys: Vec<String> = (0..GET_MANY).map(|i| format!("k/{i}")).collect();
+    assert!(valid_batch(&keys));
+    assert!(!valid_batch(&[]));
+    assert!(!valid_batch(&[String::new()]));
+    let mut more = keys.clone();
+    more.push("k/extra".into());
+    assert!(!valid_batch(&more));
+    let long = vec!["x".repeat(1000); 25];
+    assert!(!valid_batch(&long));
+    let widest: Vec<String> = vec!["x".repeat(GET_MANY_KEY_BYTES / GET_MANY); GET_MANY];
+    assert!(valid_batch(&widest));
+    let body = serde_json::to_vec(&SourceRead::GetMany { keys: widest }).unwrap();
+    assert!(body.len() < REQUEST_MAX, "{}", body.len());
+    // The operation an older Worker parses has no `get_many`.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+    #[allow(dead_code)]
+    enum Older {
+        List {
+            after: Option<String>,
+            cursor: Option<String>,
+        },
+        Get {
+            key: String,
+        },
+    }
+    let batch = serde_json::to_vec(&SourceRead::GetMany { keys }).unwrap();
+    assert!(serde_json::from_slice::<Older>(&batch).is_err());
+    let single = serde_json::to_vec(&SourceRead::Get { key: "k/1".into() }).unwrap();
+    assert!(serde_json::from_slice::<Older>(&single).is_ok());
 }

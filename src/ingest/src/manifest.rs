@@ -219,6 +219,9 @@ pub struct Status {
     /// Seconds left, when the listing is complete.
     pub eta_s: Option<u64>,
     pub last_error: Option<String>,
+    /// Where this session's time went (docs/plans/ingest-bytes.md); absent in older runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timings: Option<crate::timing::Timings>,
 }
 
 /// `report.json`, written at the end.
@@ -252,6 +255,9 @@ pub struct Report {
     /// The run stopped because its write budget was spent; continue it with a new grant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub budget_spent: bool,
+    /// Where this session's time went (docs/plans/ingest-bytes.md); absent in older runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timings: Option<crate::timing::Timings>,
 }
 
 /// `ingest/runs/{run}/`.

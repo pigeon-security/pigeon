@@ -227,10 +227,17 @@ pub async fn fetch(req: &mut Request, env: &Env) -> Result<Response> {
             if expected > wire::MAX_BLOB {
                 return error(413, "payload exceeds the atomic single-write limit");
             }
-            if !charge(env, &grant, expected).await? {
+            // The budget charge (a D1 round trip) and the body read run together; the write
+            // happens only once both succeed (docs/plans/ingest-bytes.md).
+            let (charged, body) = futures_util::future::join(
+                charge(env, &grant, expected),
+                bounded_body(req, expected),
+            )
+            .await;
+            if !charged? {
                 return error(429, "run write budget exhausted");
             }
-            let Some(body) = bounded_body(req, expected).await? else {
+            let Some(body) = body? else {
                 return error(413, "payload exceeds its declared size");
             };
             if body.len() as u64 != expected || wire::hashes(&body) != (sha.clone(), blake.clone())

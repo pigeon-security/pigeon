@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod protocol;
 pub mod scaleway;
 pub mod source_credentials;
+pub mod timing;
 
 use std::fmt;
 

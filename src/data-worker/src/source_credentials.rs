@@ -241,6 +241,25 @@ pub(crate) async fn runner_read(req: &mut Request, env: &Env) -> Result<Response
             response.headers_mut().set("cache-control", "no-store")?;
             Ok(response)
         }
+        // Many single-object URLs in one request: the same check and signature per key, one
+        // Secrets Store read for the batch (docs/plans/ingest-bytes.md).
+        wire::Read::GetMany { keys: wanted }
+            if wire::valid_batch(&wanted)
+                && wanted.iter().all(|key| grant.permits(&bound, key)) =>
+        {
+            let Some(lifetime) = grant.get_lifetime(crate::now_ms()) else {
+                return Response::error("source grant expired", 401);
+            };
+            let date = s3::amz_date(worker::js_sys::Date::now());
+            let mut urls = Vec::with_capacity(wanted.len());
+            for key in &wanted {
+                let path = s3::object_path(&bound.bucket, key);
+                urls.push(s3::presign_get(&endpoint, &path, &keys, &date, lifetime)?);
+            }
+            let mut response = Response::from_json(&wire::Downloads { urls })?;
+            response.headers_mut().set("cache-control", "no-store")?;
+            Ok(response)
+        }
         _ => Response::error("object is outside the approved source prefix", 403),
     }
 }

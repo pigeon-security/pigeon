@@ -2780,7 +2780,8 @@ fn core_ingest_plans_hosts_and_estimates() {
     assert!(s.hours_low > 1.0 && s.hours_high < 3.0, "{s:?}");
     assert!(s.total_usd > 1.0 && s.total_usd < 10.0, "{s:?}");
     let c = estimate(Host::Cloudflare, 3 * tb / 2, 2_500_000, 0.3);
-    assert!(c.hours_low > 2.0 && c.hours_high < 7.0, "{c:?}");
+    // 20-50 MB/s from a container before any run is measured (docs/plans/ingest-bytes.md).
+    assert!(c.hours_low > 8.0 && c.hours_high < 21.0, "{c:?}");
     assert!(c.total_usd > 1.0 && c.total_usd < 30.0, "{c:?}");
     let l = estimate(Host::Local, tb, 1_000_000, 0.3);
     assert_eq!(l.host_usd, 0.0);

@@ -18,6 +18,11 @@ const STALE_MS: i64 = 15 * 60_000;
 /// Worker threads of a run: IO-bound small objects on a 4-vCPU host.
 pub(crate) const THREADS: u32 = 32;
 
+/// Worker threads of a Cloudflare Container run: it reaches B2 and the Data Worker over the
+/// internet, so each object waits on more round trips and more of them are kept in flight
+/// (docs/plans/ingest-bytes.md). Memory staging is bounded by the runner's budget, not this.
+pub(crate) const CLOUDFLARE_THREADS: u32 = 64;
+
 /// Objects in flight assumed for `host` before a run there is measured. DigitalOcean and
 /// Scaleway build the runner at the approved commit, so they run the parallel engine. A
 /// Cloudflare Container runs the image pinned by hand, which may be an older serial runner, so

@@ -6,9 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use crate::manifest::{
     report_key, status_key,
 };
 use crate::metrics::{Hasher, Kind, Metrics, hamming, normalise};
+use crate::timing::{Stage, Stages};
 use crate::{Error, blob_key};
 
 /// One listed object.
@@ -89,11 +90,27 @@ pub trait Spool: Sync {
     /// Bytes still free. Objects larger than this are hashed while streaming and read a second
     /// time to copy, never spooled or opened (flag `over_spool`).
     fn free_bytes(&self) -> u64;
+    /// The largest object staged in memory rather than in a spool file (1 MiB by default).
+    fn memory_limit(&self) -> u64 {
+        MEMORY_BYTES
+    }
+    /// The most bytes staged in memory at once; past it objects go to spool files. Unbounded by
+    /// default (the memory limit and the in-flight window bound it).
+    fn memory_budget(&self) -> u64 {
+        u64::MAX
+    }
 }
 
 /// The time, given, so runs are reproducible in tests.
 pub trait Clock: Sync {
     fn now_ms(&self) -> i64;
+    /// A monotonic clock in microseconds, for stage timings only (docs/plans/ingest-bytes.md).
+    /// By default the wall clock's milliseconds.
+    fn now_us(&self) -> u64 {
+        u64::try_from(self.now_ms())
+            .unwrap_or(0)
+            .saturating_mul(1000)
+    }
 }
 
 /// A reader that hashes what passes and fails at its end when the bytes do not have the
@@ -183,14 +200,92 @@ const LIST_CAP: usize = 200;
 const NEAR_BITS: u32 = 3;
 /// Read buffer size.
 const BUF: usize = 64 * 1024;
-/// Files up to this size are staged in memory rather than in the spool.
-const MEMORY_BYTES: u64 = 1024 * 1024;
+/// Files up to this size are staged in memory rather than in the spool, unless the spool says
+/// otherwise ([`Spool::memory_limit`]).
+pub const MEMORY_BYTES: u64 = 1024 * 1024;
 /// Objects in flight (read, waiting in order, or uploading) per worker thread.
 const WINDOW_PER_THREAD: usize = 4;
 /// Most worker threads.
 const MAX_THREADS: usize = 256;
 /// Most blob keys in one batched existence check.
 const HEAD_BATCH: usize = 500;
+/// Most existence-check threads (and batches in flight) of the parallel engine.
+const MAX_LOOKUPS: usize = 8;
+
+/// What every thread of a run shares: the stage timings and the bytes staged in memory.
+struct Shared {
+    stages: Stages,
+    memory: Arc<AtomicU64>,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            stages: Stages::new(),
+            memory: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Times `f` as one pass of `stage` over `bytes`.
+    fn timed<T>(&self, r: &Run<'_>, stage: Stage, bytes: u64, f: impl FnOnce() -> T) -> T {
+        let at = r.clock.now_us();
+        let out = f();
+        self.stages
+            .add(stage, r.clock.now_us().saturating_sub(at), bytes);
+        out
+    }
+
+    /// Reserves `size` bytes of the memory budget `budget`; false when they do not fit.
+    fn reserve(&self, size: u64, budget: u64) -> bool {
+        let mut held = self.memory.load(Ordering::SeqCst);
+        loop {
+            let Some(next) = held.checked_add(size).filter(|n| *n <= budget) else {
+                return false;
+            };
+            match self
+                .memory
+                .compare_exchange_weak(held, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return true,
+                Err(now) => held = now,
+            }
+        }
+    }
+}
+
+/// A file staged in memory; gives its reservation back when dropped.
+struct MemFile {
+    cursor: Cursor<Vec<u8>>,
+    held: Arc<AtomicU64>,
+    reserved: u64,
+}
+
+impl Read for MemFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.cursor.read(buf)
+    }
+}
+
+impl Write for MemFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.cursor.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for MemFile {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        self.cursor.seek(to)
+    }
+}
+
+impl Drop for MemFile {
+    fn drop(&mut self) {
+        self.held.fetch_sub(self.reserved, Ordering::SeqCst);
+    }
+}
 
 /// Runs `f` and, when it fails, again up to [`RETRIES`] more times.
 fn retry<T>(mut f: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
@@ -237,6 +332,7 @@ struct Item<'x> {
 /// The state of one run.
 struct Engine<'r, 'a> {
     r: &'r Run<'a>,
+    sh: &'r Shared,
     counters: Counters,
     seq: u64,
     after_key: Option<String>,
@@ -254,6 +350,8 @@ struct Engine<'r, 'a> {
     exhausted: bool,
     dups: HashMap<String, (u64, u64)>,
     started_ms: i64,
+    /// The monotonic clock when this session started, for stage timings.
+    started_us: u64,
     last_status_ms: i64,
     base_read: u64,
     base_listed: u64,
@@ -312,36 +410,63 @@ fn hash_file(f: &mut dyn SpoolFile, fingerprint: bool) -> Result<Metrics, Error>
     h.finish()
 }
 
-/// Reads one object once: into memory (small files) or a spool file while hashing when it
-/// fits, else hashing only.
-fn stage(r: &Run<'_>, key: &str, size: u64) -> Result<Staged, Error> {
+/// Reads one object once: into memory (files up to the spool's memory limit, within its memory
+/// budget) or a spool file while hashing when it fits, else hashing only. The same bytes are
+/// hashed and kept whichever holds them.
+fn stage(r: &Run<'_>, sh: &Shared, key: &str, size: u64) -> Result<Staged, Error> {
+    let opened = r.clock.now_us();
     let mut src = r.source.open(key)?;
+    let mut at = r.clock.now_us();
+    sh.stages
+        .add(Stage::SourceOpen, at.saturating_sub(opened), 0);
     let mut h = Hasher::new(r.job.fingerprints);
     let mut buf = vec![0u8; BUF];
+    let mut on_disk = false;
     let mut spool_file: Option<Box<dyn SpoolFile>> = if size > r.spool.free_bytes() {
         None
-    } else if size <= MEMORY_BYTES {
-        Some(Box::new(Cursor::new(Vec::with_capacity(size as usize))))
+    } else if size <= r.spool.memory_limit() && sh.reserve(size, r.spool.memory_budget()) {
+        Some(Box::new(MemFile {
+            cursor: Cursor::new(Vec::with_capacity(size as usize)),
+            held: Arc::clone(&sh.memory),
+            reserved: size,
+        }))
     } else {
+        on_disk = true;
         Some(r.spool.create()?)
     };
+    let (mut read_us, mut hash_us, mut write_us, mut total) = (0u64, 0u64, 0u64, 0u64);
     loop {
         let n = src
             .read(&mut buf)
             .map_err(|e| Error::Source(e.to_string()))?;
+        let read = r.clock.now_us();
+        read_us += read.saturating_sub(at);
         if n == 0 {
             break;
         }
+        total += n as u64;
         h.update(&buf[..n]);
+        let hashed = r.clock.now_us();
+        hash_us += hashed.saturating_sub(read);
         if let Some(f) = spool_file.as_mut() {
             f.write_all(&buf[..n])?;
         }
+        at = r.clock.now_us();
+        write_us += at.saturating_sub(hashed);
     }
     if let Some(f) = spool_file.as_mut() {
         f.seek(SeekFrom::Start(0))?;
     }
+    let finishing = r.clock.now_us();
+    let metrics = h.finish()?;
+    hash_us += r.clock.now_us().saturating_sub(finishing);
+    sh.stages.add(Stage::SourceRead, read_us, total);
+    sh.stages.add(Stage::Hash, hash_us, total);
+    if on_disk {
+        sh.stages.add(Stage::SpoolWrite, write_us, total);
+    }
     Ok(Staged {
-        metrics: h.finish()?,
+        metrics,
         over_spool: spool_file.is_none(),
         file: spool_file,
     })
@@ -350,6 +475,7 @@ fn stage(r: &Run<'_>, key: &str, size: u64) -> Result<Staged, Error> {
 /// Writes the bytes of a staged file to `key`, from its spool file or a verified re-read.
 fn put(
     r: &Run<'_>,
+    sh: &Shared,
     key: &str,
     file: &mut Option<Box<dyn SpoolFile>>,
     metrics: &Metrics,
@@ -358,15 +484,67 @@ fn put(
     retry(|| match file.as_mut() {
         Some(f) => {
             f.seek(SeekFrom::Start(0))?;
-            r.dest.put_blob(key, f, metrics.size, metrics)
+            sh.timed(r, Stage::Upload, metrics.size, || {
+                r.dest.put_blob(key, f, metrics.size, metrics)
+            })
         }
         None => {
             let src_key = reopen.ok_or_else(|| Error::Io("no source to copy from".into()))?;
             let src = r.source.open(src_key)?;
             let mut v = Verify::new(src, metrics.clone());
-            r.dest.put_blob(key, &mut v, metrics.size, metrics)
+            sh.timed(r, Stage::Upload, metrics.size, || {
+                r.dest.put_blob(key, &mut v, metrics.size, metrics)
+            })
         }
     })
+}
+
+/// A blob's existence, as the destination answers it, for the coordinator's decisions.
+type Answer = Result<Option<Head>, Error>;
+
+/// Existence checks for first-seen SHA-256s, batched when there are several: a failed batch
+/// falls back to one check each, so every hash gets its own answer.
+fn look_up(r: &Run<'_>, sh: &Shared, shas: Vec<String>) -> Vec<(String, Answer)> {
+    if shas.len() >= 2 {
+        let keys: Vec<String> = shas.iter().map(|sha| blob_key(sha)).collect();
+        let heads = sh.timed(r, Stage::Lookup, 0, || r.dest.head_many(&keys));
+        if let Ok(heads) = heads
+            && heads.len() == shas.len()
+        {
+            return shas.into_iter().zip(heads.into_iter().map(Ok)).collect();
+        }
+    }
+    shas.into_iter()
+        .map(|sha| {
+            let key = blob_key(&sha);
+            let answer = retry(|| sh.timed(r, Stage::Lookup, 0, || r.dest.head(&key)));
+            (sha, answer)
+        })
+        .collect()
+}
+
+/// An existence-check thread: answers batches until the coordinator hangs up.
+fn looker(
+    r: &Run<'_>,
+    sh: &Shared,
+    batches: &Mutex<mpsc::Receiver<Vec<String>>>,
+    done: mpsc::Sender<Done>,
+    cancel: &AtomicBool,
+) {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let batch = match batches.lock() {
+            Ok(rx) => rx.recv(),
+            Err(_) => return,
+        };
+        let Ok(batch) = batch else { return };
+        let answers = look_up(r, sh, batch);
+        if done.send(Done::Looked { answers }).is_err() {
+            return;
+        }
+    }
 }
 
 /// Work for a worker thread of the parallel engine.
@@ -393,11 +571,16 @@ enum Done {
         seq: u64,
         result: Result<(), Error>,
     },
+    /// Existence answers for a batch of first-seen SHA-256s.
+    Looked {
+        answers: Vec<(String, Answer)>,
+    },
 }
 
 /// A worker thread: takes tasks until the coordinator hangs up or cancels what is queued.
 fn worker(
     r: &Run<'_>,
+    sh: &Shared,
     tasks: &Mutex<mpsc::Receiver<Task>>,
     done: mpsc::Sender<Done>,
     cancel: &AtomicBool,
@@ -414,7 +597,7 @@ fn worker(
         let out = match task {
             Task::Stage { seq, key, size } => Done::Staged {
                 seq,
-                result: retry(|| stage(r, &key, size)),
+                result: retry(|| stage(r, sh, &key, size)),
             },
             Task::Put {
                 seq,
@@ -424,7 +607,7 @@ fn worker(
                 reopen,
             } => Done::Put {
                 seq,
-                result: put(r, &key, &mut file, &metrics, reopen.as_deref()),
+                result: put(r, sh, &key, &mut file, &metrics, reopen.as_deref()),
             },
         };
         if done.send(out).is_err() {
@@ -435,6 +618,16 @@ fn worker(
 
 /// Objects handed to the pool to read, by sequence number, with their result once read.
 type Reading = BTreeMap<u64, (Object, Option<Result<Staged, Error>>)>;
+
+/// The coordinator's side of the existence-check pool.
+struct Lookups {
+    tx: mpsc::Sender<Vec<String>>,
+    /// Threads, and so batches in flight at most.
+    threads: usize,
+    in_flight: usize,
+    /// Hashes in a batch in flight.
+    asked: HashSet<String>,
+}
 
 /// Where a decided object's upload stands.
 enum Upload {
@@ -688,7 +881,8 @@ impl<'r, 'a> Engine<'r, 'a> {
             flags.push(Flag::OverSpool);
         }
         let lookup = if first_time {
-            match retry(|| r.dest.head(&blob_key(&sha))) {
+            let key = blob_key(&sha);
+            match retry(|| self.sh.timed(r, Stage::Lookup, 0, || r.dest.head(&key))) {
                 Ok(None) => Lookup::Absent,
                 Ok(Some(h)) => Lookup::Present(h),
                 Err(e) => {
@@ -713,7 +907,7 @@ impl<'r, 'a> Engine<'r, 'a> {
         }
         let mut d = d;
         if writes && let Some(key) = &r2_key {
-            match put(r, key, &mut file, &metrics, item.reopen) {
+            match put(r, self.sh, key, &mut file, &metrics, item.reopen) {
                 Ok(()) => {}
                 // A listed object is left for a continuation; a member fails.
                 Err(Error::Exhausted) if item.depth == 0 => {
@@ -904,7 +1098,7 @@ impl<'r, 'a> Engine<'r, 'a> {
             self.object_too_large(obj);
             return;
         }
-        let staged = retry(|| stage(r, &obj.key, obj.size));
+        let staged = retry(|| stage(r, self.sh, &obj.key, obj.size));
         self.object_staged(obj, staged);
     }
 
@@ -960,7 +1154,7 @@ impl<'r, 'a> Engine<'r, 'a> {
         seq: u64,
         obj: Object,
         staged: Staged,
-        hints: &mut HashMap<String, Option<Head>>,
+        hints: &mut HashMap<String, Answer>,
         tasks: &mpsc::Sender<Task>,
         uploading: &mut HashMap<String, u64>,
     ) -> Pending {
@@ -977,10 +1171,15 @@ impl<'r, 'a> Engine<'r, 'a> {
         if over_spool {
             flags.push(Flag::OverSpool);
         }
+        // An answer for a hash already seen in this run is not needed any more.
+        let answer = hints.remove(&sha);
         let lookup = if first_time {
-            let head = match hints.remove(&sha) {
-                Some(hint) => Ok(hint),
-                None => retry(|| r.dest.head(&blob_key(&sha))),
+            let head = match answer {
+                Some(answer) => answer,
+                None => {
+                    let key = blob_key(&sha);
+                    retry(|| self.sh.timed(r, Stage::Lookup, 0, || r.dest.head(&key)))
+                }
             };
             match head {
                 Ok(None) => Lookup::Absent,
@@ -1171,42 +1370,47 @@ impl<'r, 'a> Engine<'r, 'a> {
         Ok(())
     }
 
-    /// One batched existence check for the first-seen blobs among the objects read so far, as
-    /// hints. A failed batch leaves no hints: each blob is then looked up on its own.
-    fn prefetch_heads(
+    /// Sends the first-seen hashes among the objects read so far to the existence-check pool,
+    /// in batches of up to [`HEAD_BATCH`], while it has room. The coordinator never waits on a
+    /// check: an object whose answer is still out waits in order, as one whose hash is uploading
+    /// does (docs/plans/ingest-bytes.md).
+    fn request_lookups(
         &self,
         reading: &Reading,
-        hints: &mut HashMap<String, Option<Head>>,
+        hints: &mut HashMap<String, Answer>,
         uploading: &HashMap<String, u64>,
+        lookups: &mut Lookups,
     ) {
         if hints.len() > 4 * HEAD_BATCH {
+            // Unused answers (hashes decided another way); any still needed are asked again.
             hints.clear();
         }
-        let mut want: Vec<String> = Vec::new();
-        let mut asked = HashSet::new();
-        for (_, staged) in reading.values() {
-            let Some(staged) = staged else { break };
-            let Ok(staged) = staged else { continue };
-            let sha = &staged.metrics.sha256;
-            if !self.seen.contains(sha)
-                && !hints.contains_key(sha)
-                && !uploading.contains_key(sha)
-                && asked.insert(sha.clone())
-            {
-                want.push(sha.clone());
-                if want.len() >= HEAD_BATCH {
-                    break;
+        while lookups.in_flight < lookups.threads {
+            let mut want: Vec<String> = Vec::new();
+            let mut batch = HashSet::new();
+            for (_, staged) in reading.values() {
+                let Some(Ok(staged)) = staged else { continue };
+                let sha = &staged.metrics.sha256;
+                if !self.seen.contains(sha)
+                    && !hints.contains_key(sha)
+                    && !uploading.contains_key(sha)
+                    && !lookups.asked.contains(sha)
+                    && batch.insert(sha.clone())
+                {
+                    want.push(sha.clone());
+                    if want.len() >= HEAD_BATCH {
+                        break;
+                    }
                 }
             }
-        }
-        if want.len() < 2 {
-            return;
-        }
-        let keys: Vec<String> = want.iter().map(|sha| blob_key(sha)).collect();
-        if let Ok(heads) = self.r.dest.head_many(&keys)
-            && heads.len() == want.len()
-        {
-            hints.extend(want.into_iter().zip(heads));
+            if want.is_empty() {
+                return;
+            }
+            lookups.asked.extend(want.iter().cloned());
+            if lookups.tx.send(want).is_err() {
+                return;
+            }
+            lookups.in_flight += 1;
         }
     }
 
@@ -1216,24 +1420,29 @@ impl<'r, 'a> Engine<'r, 'a> {
         reading: &mut Reading,
         pending: &mut VecDeque<Pending>,
         uploading: &mut HashMap<String, u64>,
-        hints: &mut HashMap<String, Option<Head>>,
+        hints: &mut HashMap<String, Answer>,
         tasks: &mpsc::Sender<Task>,
+        lookups: &mut Lookups,
     ) -> Result<(), Error> {
-        self.prefetch_heads(reading, hints, uploading);
+        self.request_lookups(reading, hints, uploading, lookups);
         while !self.exhausted
             && let Some(mut entry) = reading.first_entry()
         {
             let seq = *entry.key();
-            let (zip, waits) = match entry.get_mut().1.as_mut() {
+            let (zip, waits, unanswered) = match entry.get_mut().1.as_mut() {
                 None => break,
-                Some(Err(_)) => (false, false),
-                Some(Ok(staged)) => (
-                    staged
-                        .file
-                        .as_mut()
-                        .is_some_and(|f| file_is_zip(f.as_mut())),
-                    uploading.contains_key(&staged.metrics.sha256),
-                ),
+                Some(Err(_)) => (false, false, false),
+                Some(Ok(staged)) => {
+                    let sha = &staged.metrics.sha256;
+                    (
+                        staged
+                            .file
+                            .as_mut()
+                            .is_some_and(|f| file_is_zip(f.as_mut())),
+                        uploading.contains_key(sha),
+                        !self.seen.contains(sha) && !hints.contains_key(sha),
+                    )
+                }
             };
             // The same blob is uploading: its result decides whether this one is canonical.
             if waits {
@@ -1241,6 +1450,10 @@ impl<'r, 'a> Engine<'r, 'a> {
             }
             // A zip is opened in order, after everything before it is finished.
             if zip && !pending.is_empty() {
+                break;
+            }
+            // A first sighting waits for its existence answer (a zip looks itself up).
+            if unanswered && !zip {
                 break;
             }
             let (obj, staged) = entry.remove();
@@ -1274,6 +1487,8 @@ impl<'r, 'a> Engine<'r, 'a> {
             pending.push_back(p);
             self.drain(pending)?;
         }
+        // Answers consumed above may leave a waiting first sighting with none: ask now.
+        self.request_lookups(reading, hints, uploading, lookups);
         Ok(())
     }
 
@@ -1285,8 +1500,10 @@ impl<'r, 'a> Engine<'r, 'a> {
         tasks: mpsc::Sender<Task>,
         done: mpsc::Receiver<Done>,
         pages: mpsc::Receiver<Result<Page, Error>>,
+        mut lookups: Lookups,
     ) -> Result<bool, Error> {
         let r = self.r;
+        let stages = &self.sh.stages;
         let after = self.after_key.clone();
         let mut queue: VecDeque<Object> = VecDeque::new();
         let mut listing = true;
@@ -1297,7 +1514,7 @@ impl<'r, 'a> Engine<'r, 'a> {
         let mut reading: Reading = BTreeMap::new();
         let mut pending: VecDeque<Pending> = VecDeque::new();
         let mut uploading: HashMap<String, u64> = HashMap::new();
-        let mut hints: HashMap<String, Option<Head>> = HashMap::new();
+        let mut hints: HashMap<String, Answer> = HashMap::new();
         loop {
             if !stopping && r.stop.load(Ordering::SeqCst) {
                 stopping = true;
@@ -1306,7 +1523,10 @@ impl<'r, 'a> Engine<'r, 'a> {
             while listing && !stopping && queue.len() < window {
                 let idle = queue.is_empty() && reading.is_empty() && pending.is_empty();
                 let got = if idle {
-                    pages.recv().map_err(|_| TryRecvError::Disconnected)
+                    let at = r.clock.now_us();
+                    let page = pages.recv().map_err(|_| TryRecvError::Disconnected);
+                    stages.wait(Stage::CoordinatorWait, r.clock.now_us().saturating_sub(at));
+                    page
                 } else {
                     pages.try_recv()
                 };
@@ -1354,6 +1574,7 @@ impl<'r, 'a> Engine<'r, 'a> {
                 &mut uploading,
                 &mut hints,
                 &tasks,
+                &mut lookups,
             )?;
             self.drain(&mut pending)?;
             if self.exhausted {
@@ -1368,7 +1589,18 @@ impl<'r, 'a> Engine<'r, 'a> {
                 }
                 continue;
             }
-            let mut next = match done.recv_timeout(Duration::from_millis(200)) {
+            let full = reading.len() + pending.len() >= window;
+            let at = r.clock.now_us();
+            let got = done.recv_timeout(Duration::from_millis(200));
+            stages.wait(
+                if full {
+                    Stage::WindowFull
+                } else {
+                    Stage::CoordinatorWait
+                },
+                r.clock.now_us().saturating_sub(at),
+            );
+            let mut next = match got {
                 Ok(d) => Some(d),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => {
@@ -1385,6 +1617,13 @@ impl<'r, 'a> Engine<'r, 'a> {
                     Done::Put { seq, result } => {
                         self.put_done(&mut pending, &mut uploading, seq, result)
                     }
+                    Done::Looked { answers } => {
+                        lookups.in_flight = lookups.in_flight.saturating_sub(1);
+                        for (sha, answer) in answers {
+                            lookups.asked.remove(&sha);
+                            hints.insert(sha, answer);
+                        }
+                    }
                 }
                 next = done.try_recv().ok();
             }
@@ -1400,18 +1639,31 @@ impl<'r, 'a> Engine<'r, 'a> {
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         // One page listed ahead of the one being worked on.
         let (page_tx, page_rx) = mpsc::sync_channel::<Result<Page, Error>>(1);
+        let (lookup_tx, lookup_rx) = mpsc::channel::<Vec<String>>();
+        let lookup_rx = Mutex::new(lookup_rx);
+        let lookup_threads = (threads / 8).clamp(2, MAX_LOOKUPS);
         let cancel = AtomicBool::new(false);
+        let sh = self.sh;
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 let done = done_tx.clone();
                 let (tasks, cancel) = (&task_rx, &cancel);
-                scope.spawn(move || worker(r, tasks, done, cancel));
+                scope.spawn(move || worker(r, sh, tasks, done, cancel));
+            }
+            for _ in 0..lookup_threads {
+                let done = done_tx.clone();
+                let (batches, cancel) = (&lookup_rx, &cancel);
+                scope.spawn(move || looker(r, sh, batches, done, cancel));
             }
             drop(done_tx);
             scope.spawn(move || {
                 let mut token: Option<String> = None;
                 loop {
-                    let page = retry(|| r.source.list(after.as_deref(), token.as_deref()));
+                    let page = retry(|| {
+                        sh.timed(r, Stage::List, 0, || {
+                            r.source.list(after.as_deref(), token.as_deref())
+                        })
+                    });
                     let next = page.as_ref().ok().and_then(|p| p.next.clone());
                     let failed = page.is_err();
                     if page_tx.send(page).is_err() || failed || r.stop.load(Ordering::SeqCst) {
@@ -1423,7 +1675,19 @@ impl<'r, 'a> Engine<'r, 'a> {
                     }
                 }
             });
-            let ended = self.coordinate(threads * WINDOW_PER_THREAD, task_tx, done_rx, page_rx);
+            let lookups = Lookups {
+                tx: lookup_tx,
+                threads: lookup_threads,
+                in_flight: 0,
+                asked: HashSet::new(),
+            };
+            let ended = self.coordinate(
+                threads * WINDOW_PER_THREAD,
+                task_tx,
+                done_rx,
+                page_rx,
+                lookups,
+            );
             // Queued work is not needed once the coordinator has ended.
             cancel.store(true, Ordering::SeqCst);
             ended
@@ -1440,9 +1704,12 @@ impl<'r, 'a> Engine<'r, 'a> {
                 body.push('\n');
             }
             let key = part_key(&r.job.run, self.seq);
+            let size = body.len() as u64;
             retry(|| {
-                r.dest
-                    .put_object(&key, body.as_bytes(), "application/x-ndjson")
+                self.sh.timed(r, Stage::Control, size, || {
+                    r.dest
+                        .put_object(&key, body.as_bytes(), "application/x-ndjson")
+                })
             })?;
             self.seq += 1;
             self.lines.clear();
@@ -1455,7 +1722,21 @@ impl<'r, 'a> Engine<'r, 'a> {
         };
         let body = serde_json::to_vec(&cp).map_err(|e| Error::Io(e.to_string()))?;
         let key = checkpoint_key(&r.job.run);
-        retry(|| r.dest.put_object(&key, &body, "application/json"))
+        let size = body.len() as u64;
+        retry(|| {
+            self.sh.timed(r, Stage::Control, size, || {
+                r.dest.put_object(&key, &body, "application/json")
+            })
+        })
+    }
+
+    /// This session's stage timings.
+    fn timings(&self) -> crate::timing::Timings {
+        let r = self.r;
+        let elapsed = r.clock.now_us().saturating_sub(self.started_us) / 1000;
+        self.sh
+            .stages
+            .snapshot(r.job.threads.clamp(1, MAX_THREADS as u32), elapsed)
     }
 
     /// Writes `status.json`. A failed write is noted, not fatal.
@@ -1475,10 +1756,16 @@ impl<'r, 'a> Engine<'r, 'a> {
             read_rate: read as f64 / secs,
             eta_s: None,
             last_error: self.last_error.clone(),
+            timings: Some(self.timings()),
         };
         if let Ok(body) = serde_json::to_vec(&st) {
             let key = status_key(&r.job.run);
-            if let Err(e) = retry(|| r.dest.put_object(&key, &body, "application/json")) {
+            let size = body.len() as u64;
+            if let Err(e) = retry(|| {
+                self.sh.timed(r, Stage::Control, size, || {
+                    r.dest.put_object(&key, &body, "application/json")
+                })
+            }) {
                 self.last_error = Some(e.to_string());
             }
         }
@@ -1496,7 +1783,11 @@ impl<'r, 'a> Engine<'r, 'a> {
         let mut token: Option<String> = None;
         let mut first = true;
         loop {
-            let page = retry(|| r.source.list(after.as_deref(), token.as_deref()))?;
+            let page = retry(|| {
+                self.sh.timed(r, Stage::List, 0, || {
+                    r.source.list(after.as_deref(), token.as_deref())
+                })
+            })?;
             if first {
                 first = false;
                 self.status(RunState::Running);
@@ -1557,6 +1848,7 @@ impl<'r, 'a> Engine<'r, 'a> {
             continues: self.r.job.resume.as_ref().map(|r| r.run.clone()),
             too_large: self.too_large.clone(),
             budget_spent: self.exhausted,
+            timings: Some(self.timings()),
         }
     }
 
@@ -1603,8 +1895,11 @@ pub fn run(run: &Run<'_>) -> Result<Report, Error> {
             }),
     };
     let now = run.clock.now_ms();
+    let shared = Shared::new();
     let mut e = Engine {
         r: run,
+        sh: &shared,
+        started_us: run.clock.now_us(),
         base_read: cp.counters.bytes_read,
         base_listed: cp.counters.listed,
         counters: cp.counters,

@@ -146,12 +146,37 @@ pub enum Read {
     Get {
         key: String,
     },
+    /// Up to [`GET_MANY`] presigned downloads at once, in order (docs/plans/ingest-bytes.md).
+    /// An older Data Worker answers 400 and the runner signs one at a time.
+    GetMany {
+        keys: Vec<String>,
+    },
 }
+
+/// Most keys in one `get_many`.
+pub const GET_MANY: usize = 64;
+/// Most key bytes in one `get_many`, so the request stays under [`REQUEST_MAX`].
+pub const GET_MANY_KEY_BYTES: usize = 24 * 1024;
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Download {
     pub url: String,
+}
+
+/// The answer to `get_many`: one presigned URL per key, in order.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Downloads {
+    pub urls: Vec<String>,
+}
+
+/// Whether `keys` is a `get_many` batch the Data Worker signs: 1 to [`GET_MANY`] keys, at
+/// most [`GET_MANY_KEY_BYTES`] in all, each non-empty.
+pub fn valid_batch(keys: &[String]) -> bool {
+    (1..=GET_MANY).contains(&keys.len())
+        && keys.iter().map(String::len).sum::<usize>() <= GET_MANY_KEY_BYTES
+        && keys.iter().all(|k| !k.is_empty())
 }
 
 fn signed(key: &[u8], body: &str) -> Option<hmac::Hmac<sha2::Sha256>> {

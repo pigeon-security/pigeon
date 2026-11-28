@@ -22,7 +22,18 @@ impl Clock for SystemClock {
     fn now_ms(&self) -> i64 {
         crate::client::now_ms() as i64
     }
+
+    fn now_us(&self) -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let start = START.get_or_init(std::time::Instant::now);
+        u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
 }
+
+/// The default budget for files staged in memory: 3 GiB of a `standard-4`'s 12 GiB.
+const DEFAULT_MEMORY_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+/// The largest file staged in memory: the managed destination's single-write limit.
+const MEMORY_LIMIT: u64 = 16 * 1024 * 1024;
 
 fn keys(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Keys, String> {
     let value = env(name).ok_or_else(|| format!("{name} is not set"))?;
@@ -88,8 +99,17 @@ pub fn run_job(
             .map_err(|_| "SPOOL_BYTES is not a number".to_string())?,
         None => DEFAULT_SPOOL_BYTES,
     };
+    let memory = match env("SPOOL_MEMORY_BYTES") {
+        Some(v) => v
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "SPOOL_MEMORY_BYTES is not a number".to_string())?,
+        None => DEFAULT_MEMORY_BYTES,
+    };
     let dir = env("SPOOL_DIR").unwrap_or_else(|| "/spool".into());
-    let spool = DirSpool::new(PathBuf::from(dir), budget).map_err(|e| e.to_string())?;
+    let spool = DirSpool::new(PathBuf::from(dir), budget)
+        .map_err(|e| e.to_string())?
+        .with_memory(MEMORY_LIMIT, memory);
     // Stop shortly before the approved run time ends, so the run checkpoints and ends `stopped`
     // (and can be continued) rather than being killed by its host.
     let stop_at = job.stop_at_ms(SystemClock.now_ms());

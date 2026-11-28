@@ -15,6 +15,8 @@ pub struct DirSpool {
     budget: u64,
     counter: AtomicU64,
     held: Arc<AtomicU64>,
+    /// The largest file staged in memory, and the most bytes staged in memory at once.
+    memory: Option<(u64, u64)>,
 }
 
 impl DirSpool {
@@ -27,7 +29,15 @@ impl DirSpool {
             budget,
             counter: AtomicU64::new(0),
             held: Arc::new(AtomicU64::new(0)),
+            memory: None,
         })
+    }
+
+    /// Stages files up to `limit` bytes in memory, at most `budget` bytes at once, instead of
+    /// the engine's default (docs/plans/ingest-bytes.md).
+    pub fn with_memory(mut self, limit: u64, budget: u64) -> Self {
+        self.memory = Some((limit, budget));
+        self
     }
 
     /// The spool directory.
@@ -57,6 +67,15 @@ impl Spool for DirSpool {
 
     fn free_bytes(&self) -> u64 {
         self.budget.saturating_sub(self.held.load(Ordering::SeqCst))
+    }
+
+    fn memory_limit(&self) -> u64 {
+        self.memory
+            .map_or(pigeon_ingest::engine::MEMORY_BYTES, |(limit, _)| limit)
+    }
+
+    fn memory_budget(&self) -> u64 {
+        self.memory.map_or(u64::MAX, |(_, budget)| budget)
     }
 }
 

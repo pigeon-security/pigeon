@@ -160,6 +160,8 @@ pub fn totals(
 
 /// Average object size under which a count extrapolated from a sample is low confidence.
 const SMALL_OBJECT: u64 = 64 * 1024;
+/// Average bytes per object from which a measured run's byte rate is its own bound.
+const BYTE_HEAVY: f64 = 256.0 * 1024.0;
 
 /// Bytes in a GiB.
 const GIB: f64 = (1u64 << 30) as f64;
@@ -198,10 +200,22 @@ pub fn estimate_run(
     };
     let b = bytes as f64;
     let o = objects as f64;
-    // Containers read B2 a little slower than a VM reads in region.
-    let (slow, fast) = match host {
-        Host::Cloudflare => (80e6, 120e6),
-        _ => (100e6, 150e6),
+    // A Cloudflare Container reaches B2 and the Data Worker over the internet, one object's
+    // round trips after another per thread: far slower than a VM in the bucket's region
+    // (6.6 MB/s measured on 2026-11-28 before the fixes of docs/plans/ingest-bytes.md).
+    // A measured run of large objects (at least 256 KiB on average) sets the byte rate itself.
+    let measured_bytes = throughput.measured.as_ref().and_then(|m| {
+        (m.bytes_per_s.is_finite()
+            && m.bytes_per_s > 0.0
+            && m.files_per_s > 0.0
+            && m.bytes_per_s / m.files_per_s >= BYTE_HEAVY)
+            .then_some(m.bytes_per_s)
+    });
+    let byte_measured = measured_bytes.is_some();
+    let (slow, fast) = match (measured_bytes, host) {
+        (Some(rate), _) => (rate, rate * 1.25),
+        (None, Host::Cloudflare) => (20e6, 50e6),
+        (None, _) => (100e6, 150e6),
     };
     let (fps_slow, fps_fast) = match &throughput.measured {
         Some(m) if m.files_per_s.is_finite() && m.files_per_s > 0.0 => {
@@ -275,9 +289,10 @@ pub fn estimate_run(
     notes.insert(
         0,
         format!(
-            "Read rate {}-{} MB/s; {:.0}% of the bytes assumed unique.",
-            (slow / 1e6) as u64,
-            (fast / 1e6) as u64,
+            "Read rate {:.1}-{:.1} MB/s{}; {:.0}% of the bytes assumed unique.",
+            slow / 1e6,
+            fast / 1e6,
+            if byte_measured { " (measured)" } else { "" },
             share * 100.0
         ),
     );
