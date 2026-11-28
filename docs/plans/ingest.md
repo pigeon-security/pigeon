@@ -1092,10 +1092,25 @@ define the create-only guarantee at completion.
 Multipart requires an approved, private Data bucket and a bucket-scoped R2 S3
 credential available only to its Data Worker. The Worker expects a Secrets
 Store binding named `INGEST_R2_PUBLISH` and trusted deployment metadata
-`INGEST_R2_ACCOUNT` and `INGEST_R2_BUCKET` matching the `DATA` binding. The
-credential value contains `account`, `bucket`, and `keys` in the established
-S3 credential format. The linked-account provisioner does not currently mint
-or bind this credential. Multipart returns 503 before staging when the binding
-is unavailable. Rollout also requires checking the bucket's incomplete
-multipart expiration rule and validating ambiguous completion against R2 with
-a disposable approved canary.
+`INGEST_R2_ACCOUNT` and `INGEST_R2_BUCKET` matching the `DATA` binding. The credential value is a single-line JSON object with `account`, `bucket`,
+and `keys` in the established `ACCESS_KEY_ID:SECRET_ACCESS_KEY` format.
+
+For a linked instance with a standalone Data Worker, create the R2 account
+S3 credential in that instance's Cloudflare account with object read/write
+limited to its existing private Data bucket. Calculate the lowercase SHA-256
+of the exact JSON bytes and put only that fingerprint in
+`data.multipart_publisher`. In the same account's Secrets Store, write the
+exact JSON with the Workers service scope under the slot
+`DATA_R2_PUBLISH_<instance-hash-prefix>_<credential-hash-prefix>`.
+The first prefix is the first 16 hex characters of the SHA-256 of the
+instance ID. The second is the first 24 hex characters of the credential
+fingerprint. The linked Data plan checks the bucket's privacy and pins the
+store, slot, generation and fingerprint. Apply rechecks the metadata and binds
+the credential only to the standalone Data Worker. A rotation uses a new
+fingerprint, a new slot, and a new approved Data plan. Account-link OAuth
+authorizes the binding but cannot mint the R2 S3 parent credential.
+
+Multipart returns 503 before staging when the binding or exact credential
+fingerprint check fails. Rollout still requires checking the bucket's
+incomplete multipart expiration rule and validating ambiguous completion
+against R2 with a disposable approved canary.

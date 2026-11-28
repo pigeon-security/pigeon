@@ -587,6 +587,13 @@ pub fn problems(record: &Instance) -> Vec<String> {
                 "The capability \"{name}\" does not accept Droplet health checks."
             ));
         }
+        if name != crate::data_store::NAME
+            && record.capabilities[name].multipart_publisher.is_some()
+        {
+            out.push(format!(
+                "The capability \"{name}\" does not accept a Data multipart publisher."
+            ));
+        }
         out.extend(crate::ingest::connections::field_problems(record, name));
         if let Some(problem) =
             crate::ingest::scaleway_source::field_problems(name, &record.capabilities[name])

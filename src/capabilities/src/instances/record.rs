@@ -176,6 +176,9 @@ pub struct CapabilitySettings {
     /// `data` only: the Backblaze B2 bucket the store is backed up to (ingest.md decision 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<crate::data_store::Backup>,
+    /// SHA-256 of the exact credential JSON in the linked Data Worker's Secrets Store slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart_publisher: Option<String>,
     /// `data` only: the approved external storage location its read tools also read
     /// (`data.read`; the `storage` profile before docs/plans/record-reshape.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1885,6 +1885,82 @@ fn named_backblaze_connections_share_one_reviewed_worker_runtime() {
 }
 
 #[test]
+fn data_multipart_publisher_is_opt_in_and_pinned_to_worker_upload() {
+    use pigeon_capabilities::{
+        data_store::placement_problems,
+        instances::{
+            data_plan::{SeenData, data_steps},
+            plan::{Ledger, Step, record},
+            record::Instance,
+        },
+    };
+
+    let account = "a".repeat(32);
+    let hash = "b".repeat(64);
+    let mut input = json!({
+        "id": "example", "title": "Example", "worker": "example-site",
+        "account": {"kind": "linked", "account_id": account},
+        "data": {"multipart_publisher": hash},
+    });
+    let instance: Instance = serde_json::from_value(input.clone()).unwrap();
+    let mut seen = SeenData {
+        artifact: Some("worker-build".into()),
+        bucket_exists: true,
+        ..Default::default()
+    };
+    let mut ledger = Ledger {
+        buckets: vec!["example-data".into()],
+        ..Default::default()
+    };
+    assert!(placement_problems(&instance).is_empty());
+    assert!(matches!(
+        data_steps(&instance, &seen, &ledger, None).as_slice(),
+        [Step::Blocked { .. }]
+    ));
+
+    let observed = |generation| {
+        serde_json::from_value(json!({
+           "account": account, "bucket": "example-data", "store": "linked-store",
+           "slot": "DATA_R2_PUBLISH_test", "generation": generation, "fingerprint": hash,
+        }))
+        .unwrap()
+    };
+    seen.publisher = Some(observed("current"));
+    let steps = data_steps(&instance, &seen, &ledger, None);
+    let upload = steps.iter().find(|step| matches!(step,
+        Step::UploadDataWorker { publisher: Some(_), bucket, .. } if bucket == "example-data"
+    )).unwrap();
+    record(&mut ledger, upload);
+    seen.worker_exists = true;
+    assert!(
+        !data_steps(&instance, &seen, &ledger, None)
+            .iter()
+            .any(|step| matches!(step, Step::UploadDataWorker { .. }))
+    );
+    seen.publisher = Some(observed("rotated"));
+    assert!(
+        data_steps(&instance, &seen, &ledger, None)
+            .iter()
+            .any(|step| matches!(
+                step,
+                Step::UploadDataWorker {
+                    publisher: Some(_),
+                    replaces: true,
+                    ..
+                }
+            ))
+    );
+
+    input["data"]["placement"] = json!("inline");
+    let inline: Instance = serde_json::from_value(input).unwrap();
+    assert!(!placement_problems(&inline).is_empty());
+    assert!(matches!(
+        data_steps(&inline, &seen, &ledger, None).as_slice(),
+        [Step::Blocked { .. }]
+    ));
+}
+
+#[test]
 fn backblaze_source_authority_is_one_read_only_bucket_and_prefix() {
     use pigeon_core::s3::backblaze_read_scope;
 

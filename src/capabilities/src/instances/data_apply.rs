@@ -495,6 +495,7 @@ pub async fn run(
                 mail_import,
                 mail_import_audit,
                 ingest_runtime,
+                publisher,
                 ..
             } => {
                 if *mail_import != crate::data_store::mail_import_enabled(instance)
@@ -521,8 +522,11 @@ pub async fn run(
                     name,
                     built,
                     &db,
-                    backup.is_some(),
-                    ingest_runtime.as_ref(),
+                    UploadOptions {
+                        backup: backup.is_some(),
+                        ingest_runtime: ingest_runtime.as_ref(),
+                        publisher: publisher.as_ref(),
+                    },
                 )
                 .await?;
                 // Keep Worker ownership even if Cloudflare's container application is not yet
@@ -926,6 +930,12 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
 const INLINE_MAIN: &str = "worker.js";
 const INLINE_SITE: &str = "site.js";
 
+struct UploadOptions<'a> {
+    backup: bool,
+    ingest_runtime: Option<&'a pigeon_ingest::container_job::Runtime>,
+    publisher: Option<&'a super::data_publisher::Publisher>,
+}
+
 /// Uploads the data Worker from `built` (each module checked against its digest), with a new
 /// `DATA_KEY` kept in the Directory; turns on its workers.dev address and keeps its URL.
 async fn upload(
@@ -934,19 +944,24 @@ async fn upload(
     name: &str,
     built: &Artifact,
     database_id: &str,
-    backup: bool,
-    ingest_runtime: Option<&pigeon_ingest::container_job::Runtime>,
+    options: UploadOptions<'_>,
 ) -> Result<()> {
+    let UploadOptions {
+        backup,
+        ingest_runtime,
+        publisher,
+    } = options;
+    let account = Account {
+        id: a.account_id.to_string(),
+        parent: String::new(),
+        secrets_store: a.secrets_store.to_string(),
+        bearer: Some(a.token.to_string()),
+        token_ledger: None,
+    };
+    super::data_publisher::verify(&account, instance, name, publisher).await?;
     let audit_bucket = if (backup && instance.account != crate::instances::record::AccountRef::Home)
         || crate::data_store::mail_import_audit_bucket(instance).is_some()
     {
-        let account = Account {
-            id: a.account_id.to_string(),
-            parent: String::new(),
-            secrets_store: a.secrets_store.to_string(),
-            bearer: Some(a.token.to_string()),
-            token_ledger: None,
-        };
         Some(crate::data_store::verify_data_jobs_audit(&account, instance).await?)
     } else {
         None
@@ -967,6 +982,9 @@ async fn upload(
             .map(|b| (b, a.secrets_store, slot.as_str())),
     };
     let mut metadata = data_plan::worker_metadata(&built.main, &bindings);
+    if let Some(publisher) = publisher {
+        super::data_publisher::bind(&mut metadata, publisher)?;
+    }
     data_plan::bind_backup_audit(&mut metadata, instance);
     data_plan::bind_backup_inventory(&mut metadata, instance);
     if let Some(bucket) = audit_bucket {

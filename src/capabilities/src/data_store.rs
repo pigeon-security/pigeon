@@ -164,6 +164,16 @@ pub fn placement_problems(record: &Instance) -> Vec<String> {
                 .into(),
         );
     }
+    if let Some(fingerprint) = s.multipart_publisher.as_deref() {
+        if !pigeon_ingest::managed_destination::digest(fingerprint) {
+            out.push("Data multipart publishing requires the credential's lowercase SHA-256 fingerprint.".into());
+        }
+        if record.account == AccountRef::Home || inline(record) {
+            out.push(
+                "Multipart publishing requires a linked Data Worker on its own Worker.".into(),
+            );
+        }
+    }
     if let Some(e) = crate::email::settings(record)
         && let Some(p) = e.placement
         && p != placement(record)

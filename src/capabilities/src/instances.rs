@@ -9,6 +9,7 @@
 pub mod data_apply;
 pub mod data_ingest_runtime;
 pub mod data_plan;
+pub(crate) mod data_publisher;
 pub mod home;
 pub mod home_site;
 pub mod layout;
@@ -878,6 +879,9 @@ impl Instances {
         if backup.is_some() {
             wanted.extend([crate::data_store::BACKUP_SCOPES, "secrets"]);
         }
+        if data_publisher::fingerprint(instance).is_some() && backup.is_none() {
+            wanted.push("secrets");
+        }
         if data_ingest_runtime::configured(instance).is_some() {
             wanted.push(data_ingest_runtime::SCOPE);
         }
@@ -917,7 +921,7 @@ impl Instances {
             String::new()
         };
         let built = data_apply::artifact(cx.account).await?;
-        let seen =
+        let mut seen =
             data_apply::observe(token, &account.id, &secrets_store, instance, built.as_ref())
                 .await
                 .map_err(|e| {
@@ -927,6 +931,19 @@ impl Instances {
                         &e.to_string(),
                     ))
                 })?;
+        if data_publisher::fingerprint(instance).is_some()
+            && seen.bucket_exists
+            && !crate::data_store::inline(instance)
+        {
+            seen.publisher = Some(
+                data_publisher::observe(
+                    account,
+                    instance,
+                    &crate::data_store::store_name(instance),
+                )
+                .await?,
+            );
+        }
         Ok(data_plan::data_parts(instance, &seen, kept, None))
     }
 

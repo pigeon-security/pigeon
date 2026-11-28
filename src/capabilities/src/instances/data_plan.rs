@@ -56,6 +56,8 @@ pub struct SeenData {
     pub notification: bool,
     /// Whether the backup's B2 key is set (`data_store::b2_slot`).
     pub backup_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<super::data_publisher::Publisher>,
     /// The email domain's zone id, when it is in the account.
     pub zone_id: Option<String>,
     /// The zone's records that matter to mail: MX, TXT and `_domainkey` CNAMEs.
@@ -375,6 +377,16 @@ pub fn data_parts(
         return blocked(format!("{name} is {}", super::plan::PLATFORM_OWNED));
     }
     let inline = crate::data_store::inline(instance);
+    let publisher = seen
+        .publisher
+        .as_ref()
+        .filter(|p| p.applies_to(instance, &name));
+    if super::data_publisher::fingerprint(instance).is_some() && (inline || publisher.is_none()) {
+        return blocked(
+            "multipart publishing requires a standalone linked Data Worker, its existing private bucket, and its own publisher credential".into(),
+        );
+    }
+
     let Some(worker) = crate::data_store::worker(instance) else {
         return blocked(
             "the data store runs inline in the instance's own Worker, and the record names none"
@@ -487,6 +499,13 @@ pub fn data_parts(
                 mail_import,
                 mail_import_audit.as_deref(),
             );
+            let module = if let Some(publisher) = publisher {
+                pigeon_core::oauth::hash(
+                    &json!({ "data_worker": module, "multipart_publisher": publisher }).to_string(),
+                )
+            } else {
+                module
+            };
             let module = match ingest_runtime {
                 Some(runtime) => pigeon_core::oauth::hash(
                     &json!({
@@ -510,6 +529,7 @@ pub fn data_parts(
                 mail_import,
                 mail_import_audit: mail_import_audit.clone(),
                 ingest_runtime: ingest_runtime.cloned(),
+                publisher: publisher.cloned(),
                 module: module.clone(),
                 replaces,
             };

@@ -63,6 +63,10 @@ impl Publisher {
             .get()
             .await?
             .ok_or_else(|| fail("the Data Worker has no multipart publishing credential"))?;
+        let fingerprint = env.var("INGEST_R2_PUBLISH_SHA256")?.to_string();
+        if datastore::sha256_hex(raw.as_bytes()) != fingerprint {
+            return Err(fail("the multipart publishing credential changed"));
+        }
         let credential: Credential = serde_json::from_str(&raw)
             .map_err(|_| fail("invalid multipart publishing credential"))?;
         if credential.account != account
