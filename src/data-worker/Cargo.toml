@@ -15,6 +15,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+pigeon-cloud = { path = "../cloud" }
 pigeon-core = { path = "../core" }
 pigeon-ingest = { path = "../ingest" }
 pigeon-email = { path = "../email" }

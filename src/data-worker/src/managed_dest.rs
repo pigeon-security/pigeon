@@ -73,7 +73,7 @@ pub(crate) async fn charge(env: &Env, grant: &wire::Grant, bytes: u64) -> Result
     Ok(row.is_some())
 }
 
-async fn bounded_body(req: &mut Request, limit: u64) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn bounded_body(req: &mut Request, limit: u64) -> Result<Option<Vec<u8>>> {
     let mut body = Vec::new();
     let mut stream = match req.stream() {
         Ok(stream) => stream,

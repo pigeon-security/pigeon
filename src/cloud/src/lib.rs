@@ -31,6 +31,7 @@ pub mod provider;
 pub mod redact;
 pub mod s3api;
 pub mod scaleway;
+pub mod scaleway_ingest;
 pub mod sink;
 pub mod slots;
 pub mod tools;

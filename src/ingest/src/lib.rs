@@ -22,6 +22,7 @@ pub mod managed_destination;
 pub mod manifest;
 pub mod metrics;
 pub mod protocol;
+pub mod scaleway;
 
 use std::fmt;
 

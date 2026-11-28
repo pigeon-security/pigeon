@@ -185,6 +185,7 @@ script = "pigeon-data-artifacts"
 dir = "src/data-worker"
 paths = [
     "src/data-worker/*",
+    "src/cloud/*",
     "src/ingest/*",
     "src/email/*",
     "ci/deploy/data-worker-build.sh",

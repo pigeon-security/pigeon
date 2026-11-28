@@ -46,7 +46,7 @@ workspace crate the Worker crate pulls in, directly or not.
 - `ai-agents`: script `pigeon-ai-agents`, crate `src/ai-agents-worker`, config `src/ai-agents-worker/wrangler.toml`
   - links: `src/ai-agents`, `src/contract`, `src/core`, `src/models`
 - `data-worker`: script `pigeon-data-artifacts`, crate `src/data-worker`
-  - links: `src/core`, `src/email`, `src/ingest`
+  - links: `src/cloud`, `src/contract`, `src/core`, `src/email`, `src/ingest`
 
 ## Where things live
 

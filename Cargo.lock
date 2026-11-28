@@ -953,6 +953,7 @@ version = "0.1.0"
 dependencies = [
  "pigeon-contract",
  "pigeon-core",
+ "pigeon-ingest",
  "serde",
  "serde_json",
  "worker",
@@ -1002,6 +1003,7 @@ name = "pigeon-data-worker"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "pigeon-cloud",
  "pigeon-core",
  "pigeon-email",
  "pigeon-ingest",
