@@ -74,3 +74,116 @@ pub struct Verify {
     /// Omitted for a permission probe, otherwise the requested prefix inside the approved scope.
     pub prefix: Option<String>,
 }
+
+pub const RUN_PATH: &str = "/ingest/source/read";
+pub const RUN_ENV: &str = "INGEST_MANAGED_SOURCE";
+pub const RUN_MAX_MS: i64 = super::managed_destination::MAX_GRANT_MS;
+pub const GET_MAX_SECONDS: u32 = 60;
+pub const REQUEST_MAX: usize = 32 * 1024;
+pub const RESPONSE_MAX: usize = 4 * 1024 * 1024;
+
+/// An opaque runner credential for the account's exact approved source and run.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerSource {
+    pub origin: String,
+    pub grant: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunGrant {
+    pub instance: String,
+    pub run: String,
+    pub reference: Reference,
+    pub prefix: String,
+    pub issued_ms: i64,
+    pub expires_ms: i64,
+}
+
+impl RunGrant {
+    fn valid(&self, now: i64) -> bool {
+        !self.instance.is_empty()
+            && self.instance.len() <= 160
+            && super::container_job::valid_run(&self.run)
+            && valid_generation(&self.reference.scope)
+            && valid_generation(&self.reference.generation)
+            && valid_read_path(&self.prefix)
+            && self.issued_ms <= now
+            && now < self.expires_ms
+            && self.expires_ms.saturating_sub(self.issued_ms) <= RUN_MAX_MS
+    }
+
+    /// Keep read authority fixed to both the deployed configuration and the approved run prefix.
+    pub fn permits(&self, bound: &Bound, key: &str) -> bool {
+        self.reference == bound.reference
+            && self.prefix.starts_with(&bound.prefix)
+            && key.starts_with(&self.prefix)
+            && valid_read_path(key)
+    }
+
+    pub fn get_lifetime(&self, now: i64) -> Option<u32> {
+        let remaining = self.expires_ms.saturating_sub(now) / 1000;
+        (remaining > 0).then(|| remaining.min(i64::from(GET_MAX_SECONDS)) as u32)
+    }
+}
+
+pub fn valid_read_path(value: &str) -> bool {
+    value.len() <= 1024
+        && !value.chars().any(char::is_control)
+        && !value
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Read {
+    List {
+        after: Option<String>,
+        cursor: Option<String>,
+    },
+    Get {
+        key: String,
+    },
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Download {
+    pub url: String,
+}
+
+fn signed(key: &[u8], body: &str) -> Option<hmac::Hmac<sha2::Sha256>> {
+    use hmac::Mac;
+    if key.is_empty() {
+        return None;
+    }
+    let mut mac = hmac::Hmac::new_from_slice(key).ok()?;
+    mac.update(b"pigeon-data-ingest-source-v1\n");
+    mac.update(body.as_bytes());
+    Some(mac)
+}
+
+pub fn issue(grant: &RunGrant, key: &[u8], now: i64) -> Option<String> {
+    use hmac::Mac;
+    if !grant.valid(now) {
+        return None;
+    }
+    let body = super::managed_destination::hex(&serde_json::to_vec(grant).ok()?);
+    let signature = super::managed_destination::hex(&signed(key, &body)?.finalize().into_bytes());
+    Some(format!("{body}.{signature}"))
+}
+
+pub fn authenticate(token: &str, key: &[u8], instance: &str, now: i64) -> Option<RunGrant> {
+    use hmac::Mac;
+    if token.len() > REQUEST_MAX {
+        return None;
+    }
+    let (body, signature) = token.split_once('.')?;
+    signed(key, body)?
+        .verify_slice(&super::managed_destination::unhex(signature)?)
+        .ok()?;
+    let grant: RunGrant = serde_json::from_slice(&super::managed_destination::unhex(body)?).ok()?;
+    (grant.instance == instance && grant.valid(now)).then_some(grant)
+}

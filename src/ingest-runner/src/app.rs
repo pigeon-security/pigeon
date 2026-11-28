@@ -7,6 +7,7 @@ use pigeon_core::s3::{Keys, parse_keys};
 use pigeon_ingest::engine::{Clock, Dest, Run, Source, run};
 use pigeon_ingest::managed_destination as managed;
 use pigeon_ingest::manifest::{JobSpec, RunState, SourceSpec};
+use pigeon_ingest::source_credentials as sources;
 
 use crate::{DirSpool, LocalSource, R2Dest, S3Source};
 
@@ -49,13 +50,23 @@ pub fn run_job(
             bucket,
             prefix,
             ..
-        } => Box::new(S3Source::new(
-            endpoint,
-            region,
-            bucket,
-            prefix,
-            keys(env, "SOURCE_KEYS")?,
-        )),
+        } => match env(sources::RUN_ENV) {
+            Some(raw) => {
+                let source =
+                    serde_json::from_str(&raw).map_err(|_| "invalid owning-account source")?;
+                Box::new(
+                    crate::managed_source::ManagedSource::new(source, endpoint, bucket)
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            None => Box::new(S3Source::new(
+                endpoint,
+                region,
+                bucket,
+                prefix,
+                keys(env, "SOURCE_KEYS")?,
+            )),
+        },
         SourceSpec::Local { root, .. } => Box::new(LocalSource::new(PathBuf::from(root))),
     };
     let dest: Box<dyn Dest> = match env(managed::ENV) {

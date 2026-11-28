@@ -4708,3 +4708,50 @@ fn owned_source_credential_binding_contains_only_generation_and_scope_metadata()
     assert_eq!(next[0].reference.scope, bindings[0].reference.scope);
     assert_ne!(next[0].slot, bindings[0].slot);
 }
+
+#[test]
+fn owned_source_grant_limits_reference_prefix_object_and_duration() {
+    use pigeon_ingest::source_credentials::{self as source, Bound, Reference, RunGrant};
+
+    let reference = Reference {
+        name: "history".into(),
+        scope: "S".repeat(43),
+        generation: "G".repeat(43),
+    };
+    let bound = Bound {
+        reference: reference.clone(),
+        slot: "INGEST_SRC_EXAMPLE".into(),
+        provider: "digitalocean".into(),
+        owner: Some("team".into()),
+        region: "tor1".into(),
+        bucket: "history-bucket".into(),
+        prefix: "archives/".into(),
+    };
+    let grant = RunGrant {
+        instance: "linked".into(),
+        run: "a".repeat(32),
+        reference,
+        prefix: "archives/2025/".into(),
+        issued_ms: 10_000,
+        expires_ms: 130_000,
+    };
+    let key = b"data-worker-signing-key";
+    let token = source::issue(&grant, key, 10_000).unwrap();
+    assert_eq!(
+        source::authenticate(&token, key, "linked", 70_000),
+        Some(grant.clone())
+    );
+    assert!(source::authenticate(&token, key, "someone-else", 70_000).is_none());
+    assert!(source::authenticate(&token, key, "linked", 130_000).is_none());
+    assert!(source::authenticate(&token, b"another-key", "linked", 70_000).is_none());
+    assert!(pigeon_ingest::managed_destination::verify(&token, key, "linked", 70_000).is_none());
+    assert!(grant.permits(&bound, "archives/2025/index.zip"));
+    assert!(!grant.permits(&bound, "archives/index.zip"));
+    assert!(!grant.permits(&bound, "archives/2025/../index.zip"));
+    let mut changed = bound;
+    changed.reference.generation = "N".repeat(43);
+    assert!(!grant.permits(&changed, "archives/2025/index.zip"));
+    assert_eq!(grant.get_lifetime(10_000), Some(60));
+    assert_eq!(grant.get_lifetime(128_500), Some(1));
+    assert_eq!(grant.get_lifetime(129_900), None);
+}

@@ -289,6 +289,70 @@ pub async fn owned_sample(
         .map_err(|_| super::bad("The owning Data Worker returned an invalid source listing."))
 }
 
+/// Check the source protocol before a provider can issue a paid run approval.
+pub async fn owned_origin(env: &Env, record: &Instance, reference: &Pin) -> Result<String> {
+    let checked = owned_read(env, record, reference, None).await?;
+    let response: Value = serde_json::from_str(&checked)?;
+    if response["runner_read"] != 1 || response["read_access"] != true {
+        return Err(super::bad(
+            "Apply the Data plan with owning-account runner support.",
+        ));
+    }
+    let (url, _) = crate::data_store::reach(env, record).await?;
+    if !pigeon_ingest::managed_destination::valid_origin(&url) {
+        return Err(super::bad("The owning Data Worker's origin is invalid."));
+    }
+    Ok(url)
+}
+
+pub async fn owned_runner(
+    env: &Env,
+    record: &Instance,
+    reference: &Pin,
+    approved_origin: &str,
+    job: &pigeon_ingest::manifest::JobSpec,
+    deadline_ms: i64,
+) -> Result<source_credentials::RunnerSource> {
+    let Some(bound) = owned_binding(record, &reference.name)? else {
+        return Err(super::bad("The approved owning-account source changed."));
+    };
+    let pigeon_ingest::manifest::SourceSpec::S3 {
+        endpoint,
+        region,
+        bucket,
+        prefix,
+        ..
+    } = &job.source
+    else {
+        return Err(super::bad("The approved owning-account source changed."));
+    };
+    if &bound.reference != reference
+        || bound.endpoint().as_ref() != Some(endpoint)
+        || &bound.region != region
+        || &bound.bucket != bucket
+        || !prefix.starts_with(&bound.prefix)
+        || job.instance != record.id
+    {
+        return Err(super::bad("The approved owning-account source changed."));
+    }
+    let (origin, key) = crate::data_store::reach(env, record).await?;
+    if origin != approved_origin {
+        return Err(super::bad("The approved owning Data Worker changed."));
+    }
+    let now = super::now_ms();
+    let grant = source_credentials::RunGrant {
+        instance: record.id.clone(),
+        run: job.run.clone(),
+        reference: reference.clone(),
+        prefix: prefix.clone(),
+        issued_ms: now,
+        expires_ms: deadline_ms,
+    };
+    let grant = source_credentials::issue(&grant, key.as_bytes(), now)
+        .ok_or_else(|| super::bad("The approved source grant has expired."))?;
+    Ok(source_credentials::RunnerSource { origin, grant })
+}
+
 pub(crate) fn generation(saved: &Saved) -> String {
     oauth::hash(&saved.sealed)
 }

@@ -99,6 +99,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         (Method::Post, pigeon_ingest::scaleway::BROKER_PATH) => {
             scaleway_compute::fetch(&mut req, &env).await
         }
+        (Method::Post, pigeon_ingest::source_credentials::RUN_PATH) => {
+            source_credentials::runner_read(&mut req, &env).await
+        }
         (Method::Post, pigeon_ingest::source_credentials::READY_PATH) => {
             source_credentials::verify(&mut req, &env).await
         }

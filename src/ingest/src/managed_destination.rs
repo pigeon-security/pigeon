@@ -56,11 +56,11 @@ impl Grant {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn unhex(value: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(value: &str) -> Option<Vec<u8>> {
     if !value.is_ascii() || !value.len().is_multiple_of(2) {
         return None;
     }

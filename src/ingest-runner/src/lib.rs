@@ -14,6 +14,8 @@ mod local;
 #[cfg(not(target_arch = "wasm32"))]
 mod managed_dest;
 #[cfg(not(target_arch = "wasm32"))]
+mod managed_source;
+#[cfg(not(target_arch = "wasm32"))]
 mod r2;
 #[cfg(not(target_arch = "wasm32"))]
 mod s3_source;

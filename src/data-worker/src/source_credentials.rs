@@ -3,7 +3,7 @@
 use pigeon_core::s3;
 use pigeon_ingest::{
     protocol,
-    source_credentials::{Bound, READY_PATH, Reference, SOURCES_BINDING, Verify},
+    source_credentials::{self as wire, Bound, Reference, SOURCES_BINDING, Verify},
 };
 use serde_json::json;
 use worker::{Env, Method, Request, Response, Result};
@@ -40,7 +40,7 @@ pub(crate) async fn verify(req: &mut Request, env: &Env) -> Result<Response> {
     if protocol::verify(
         &signature,
         "POST",
-        READY_PATH,
+        wire::READY_PATH,
         &body,
         key.as_bytes(),
         crate::now_ms(),
@@ -93,7 +93,7 @@ pub(crate) async fn verify(req: &mut Request, env: &Env) -> Result<Response> {
             Response::from_json(&listing)
         }
         Ok(_) => Response::from_json(
-            &json!({ "instance": request.instance, "source_pin": request.reference, "read_access": true }),
+            &json!({ "instance": request.instance, "source_pin": request.reference, "read_access": true, "runner_read": 1 }),
         ),
         Err(_) => Response::error("the provider did not allow the bounded listing", 422),
     }
@@ -144,4 +144,93 @@ async fn list(
         return Err(fail("the provider refused the listing"));
     }
     s3::parse_list_objects(&response.text().await?)
+}
+
+/// Serve a runner's approved source in the owning account. Sign only a single object URL
+/// at a time. The object bytes go directly from the provider to the runner.
+pub(crate) async fn runner_read(req: &mut Request, env: &Env) -> Result<Response> {
+    let Some(auth) = req.headers().get("authorization")? else {
+        return Response::error("not found", 404);
+    };
+    let Some(token) = auth.strip_prefix("Bearer ") else {
+        return Response::error("not found", 404);
+    };
+    let now = crate::now_ms();
+    let instance = env.var("INSTANCE")?.to_string();
+    let key = env.secret("DATA_KEY")?.to_string();
+    let Some(grant) = wire::authenticate(token, key.as_bytes(), &instance, now) else {
+        return Response::error("not found", 404);
+    };
+    let Some(body) = crate::managed_dest::bounded_body(req, wire::REQUEST_MAX as u64).await? else {
+        return Response::error("invalid source request length", 400);
+    };
+    let Ok(read) = serde_json::from_slice::<wire::Read>(&body) else {
+        return Response::error("invalid source read", 400);
+    };
+    let (bound, keys) = match open(env, &grant.reference).await {
+        Ok(source) => source,
+        Err(_) => return Response::error("the approved source generation is unavailable", 409),
+    };
+    if !grant.permits(&bound, &grant.prefix) {
+        return Response::error("source scope changed", 409);
+    }
+    let Some(base) = bound.endpoint() else {
+        return Response::error("invalid source endpoint", 409);
+    };
+    let endpoint = s3::Endpoint {
+        base,
+        region: bound.region.clone(),
+    };
+    match read {
+        wire::Read::List { after, cursor } => {
+            if after
+                .as_deref()
+                .is_some_and(|key| !grant.permits(&bound, key))
+            {
+                return Response::error("listing start falls outside the approved prefix", 400);
+            }
+            let mut query =
+                s3::list_objects_query(Some(&grant.prefix), None, 1000, cursor.as_deref());
+            if let (Some(after), None) = (after, cursor) {
+                query.push(("start-after".into(), after));
+            }
+            let path = s3::object_path(&bound.bucket, "");
+            match list(&endpoint, &path, &query, &keys).await {
+                Ok(page)
+                    if page
+                        .objects
+                        .iter()
+                        .all(|object| object.key.starts_with(&grant.prefix)) =>
+                {
+                    match serde_json::to_vec(&page) {
+                        Ok(bytes) if bytes.len() <= wire::RESPONSE_MAX => {
+                            let headers = worker::Headers::new();
+                            headers.set("content-type", "application/json")?;
+                            headers.set("cache-control", "no-store")?;
+                            Ok(Response::from_bytes(bytes)?.with_headers(headers))
+                        }
+                        _ => Response::error("source page exceeded its limit", 502),
+                    }
+                }
+                _ => Response::error("the provider did not return a scoped listing", 502),
+            }
+        }
+        wire::Read::Get { key } if !key.is_empty() && grant.permits(&bound, &key) => {
+            let Some(lifetime) = grant.get_lifetime(crate::now_ms()) else {
+                return Response::error("source grant expired", 401);
+            };
+            let path = s3::object_path(&bound.bucket, &key);
+            let url = s3::presign_get(
+                &endpoint,
+                &path,
+                &keys,
+                &s3::amz_date(worker::js_sys::Date::now()),
+                lifetime,
+            )?;
+            let mut response = Response::from_json(&wire::Download { url })?;
+            response.headers_mut().set("cache-control", "no-store")?;
+            Ok(response)
+        }
+        _ => Response::error("object is outside the approved source prefix", 403),
+    }
 }

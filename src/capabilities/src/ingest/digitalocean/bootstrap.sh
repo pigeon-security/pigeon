@@ -41,13 +41,14 @@ with open(sys.argv[1], encoding="utf-8") as source:
     credentials = json.load(source)
 with open(sys.argv[2], "w", encoding="utf-8") as target:
     target.write("INGEST_JOB=" + json.dumps(credentials["job"], separators=(",", ":")) + "\n")
-    if "INGEST_DESTINATION" in credentials:
-        if "DEST_KEYS" in credentials:
-            raise ValueError("conflicting ingest destination")
-        target.write("INGEST_DESTINATION=" + json.dumps(credentials["INGEST_DESTINATION"], separators=(",", ":")) + "\n")
-        variables = ("SOURCE_KEYS",)
-    else:
-        variables = ("SOURCE_KEYS", "DEST_KEYS")
+    variables = []
+    for managed, legacy in (("INGEST_MANAGED_SOURCE", "SOURCE_KEYS"), ("INGEST_DESTINATION", "DEST_KEYS")):
+        if managed in credentials:
+            if legacy in credentials:
+                raise ValueError("conflicting ingest transport")
+            target.write(managed + "=" + json.dumps(credentials[managed], separators=(",", ":")) + "\n")
+        else:
+            variables.append(legacy)
     for variable in variables:
         key = credentials[variable]
         if not key or "\r" in key or "\n" in key:

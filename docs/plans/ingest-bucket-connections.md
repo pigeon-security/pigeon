@@ -61,3 +61,11 @@ marked owning-account cannot launch through a legacy runner or save its key thro
 the home console. Leave an existing active connection in legacy mode until its
 owning-account launch adapter is available. No existing home key or provider
 credential is deleted by staging a linked slot.
+
+The external-runner source transport uses a run-scoped grant rather than giving a
+Droplet the Spaces key. Its owning Data Worker lists the exact approved prefix and
+signs a short-lived provider GET URL for one object at a time. The runner downloads
+bytes directly from the provider. The grant's run, generation, and narrower prefix
+are pinned, and changing the bound generation makes existing grants unusable.
+An owning-account Spaces run needs an applied Data Worker plan and a runner built
+with this transport. The Droplet compute credential follows its separate setup.

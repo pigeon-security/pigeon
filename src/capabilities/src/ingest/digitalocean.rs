@@ -54,6 +54,8 @@ struct Planned {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     connection: Option<connections::Pin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     destination: Option<managed_destination::Reviewed>,
 }
 
@@ -288,11 +290,29 @@ pub(super) async fn plan(
     let run_id = hex(&Sha256::digest(webauthn::random()?.as_bytes()))[..32].to_owned();
     let requested_since = u64::from(max_minutes) * MINUTE_MS;
     let dry_run = args["dry_run"].as_bool().unwrap_or(true);
-    let (sample, connection) = if let Some(name) = name {
-        let (pin, keys) = connections::open(cx.env, record, name).await?;
-        (list_spaces(binding, prefix, &keys).await, Some(pin))
+    let (sample, connection, source_origin) = if let Some(name) = name {
+        if let Some(pin) = connections::owned_reference(record, name)? {
+            if !pigeon_ingest::source_credentials::valid_read_path(prefix) {
+                return Err(bad(
+                    "This prefix cannot be read with the owning-account source transport.",
+                ));
+            }
+            let origin = connections::owned_origin(cx.env, record, &pin).await?;
+            (
+                connections::owned_sample(cx.env, record, &pin, prefix).await,
+                Some(pin),
+                Some(origin),
+            )
+        } else {
+            let (pin, keys) = connections::open(cx.env, record, name).await?;
+            (list_spaces(binding, prefix, &keys).await, Some(pin), None)
+        }
     } else {
-        (spaces::ingest_sample(record, cx.env, prefix).await, None)
+        (
+            spaces::ingest_sample(record, cx.env, prefix).await,
+            None,
+            None,
+        )
     };
     let mut missing = Vec::new();
     let (est, sample) = match sample {
@@ -392,6 +412,10 @@ pub(super) async fn plan(
         }
     }
     let commit = match super::Ingest::commit(args) {
+        Ok(commit) if source_origin.is_some() && option_env!("PIGEON_COMMIT") != Some(&commit) => {
+            missing.push("Use this deployed revision for an owning-account Spaces runner.".into());
+            None
+        }
         Ok(commit) => Some(commit),
         Err(error) => {
             missing.push(error);
@@ -441,6 +465,7 @@ pub(super) async fn plan(
         max_minutes,
         bootstrap: bootstrap_policy(),
         connection,
+        source_origin,
         destination,
     };
     let mut summary = json!({
@@ -577,7 +602,14 @@ pub(super) async fn start(
     }
     let link = crate::linked::account_for_bound(env, host, &record.id, &p.account).await?;
     let credential = health::for_ingest(env, &record).await?;
-    source_keys(env, &record, p.connection.as_ref()).await?;
+    match (&p.connection, p.source_origin.as_deref()) {
+        (Some(pin), Some(origin))
+            if connections::owned_origin(env, &record, pin).await? == origin => {}
+        (_, None) => {
+            source_keys(env, &record, p.connection.as_ref()).await?;
+        }
+        _ => return Err(bad("The approved owning Data Worker changed. Plan again.")),
+    }
     match (&p.connection, &p.destination) {
         (Some(_), Some(reviewed)) => {
             if managed_destination::ready(env, &record).await?.origin != reviewed.origin {
@@ -890,8 +922,26 @@ pub async fn bootstrap(env: &Env, host: &str, mut request: Request) -> Result<Re
     }
     let link = crate::linked::account_for_bound(env, host, &record.id, &job.plan.account).await?;
     r2::require_private_bucket(&link, &data_bucket(&record)).await?;
-    let source = source_keys(env, &record, job.plan.connection.as_ref()).await?;
-    let mut credentials = json!({"job": job.plan.job, "SOURCE_KEYS": keys_string(source)});
+    let mut credentials = json!({"job": job.plan.job});
+    match (&job.plan.connection, job.plan.source_origin.as_deref()) {
+        (Some(pin), Some(origin)) => {
+            let source = connections::owned_runner(
+                env,
+                &record,
+                pin,
+                origin,
+                &job.plan.job,
+                job.deadline_ms as i64,
+            )
+            .await?;
+            credentials[pigeon_ingest::source_credentials::RUN_ENV] = json!(source);
+        }
+        (_, None) => {
+            let source = source_keys(env, &record, job.plan.connection.as_ref()).await?;
+            credentials["SOURCE_KEYS"] = json!(keys_string(source));
+        }
+        _ => return Err(bad("The approved owning-account source is incomplete.")),
+    }
     match (&job.plan.connection, &job.plan.destination) {
         (Some(_), Some(reviewed)) => {
             let target = managed_destination::ready(env, &record).await?;
